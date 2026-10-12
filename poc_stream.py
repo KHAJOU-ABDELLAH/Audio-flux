@@ -1,10 +1,12 @@
 import yt_dlp
 import mpv
+
 def stream_audio_from_youtube(video_url):
     video = video_url
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
+        'noplaylist': True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

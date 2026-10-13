@@ -13,7 +13,7 @@ def main(page: ft.Page):
   url_input = ft.TextField(label="URL or Local Path", width=400, autofocus=True)
   path_input = ft.TextField(label="Download Path (Optional)", width=400)
 
-  # Added your new visual controls right here
+  
   album_art = ft.Image(src="placeholder.png", width=200, height=200, border_radius=10)
   artist_label = ft.Text("Artist: No Track Loaded", size=16, weight=ft.FontWeight.BOLD)
   status_label = ft.Text("Source: Idle", size=14, color="grey")
@@ -62,7 +62,7 @@ def main(page: ft.Page):
     else:
         print("Provide a URL to download!")
   
-  # 3. Layout (Your exact layout format)
+  # 3. Layout 
   page.add(
       ft.Text("Enter your media details below:", size=15, color="grey"),
       url_input,

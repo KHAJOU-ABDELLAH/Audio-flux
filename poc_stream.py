@@ -1,5 +1,6 @@
 import yt_dlp
 import mpv
+import os
 
 def stream_audio_from_youtube(video_url):
     video = video_url
@@ -27,3 +28,24 @@ def stream_audio_from_youtube(video_url):
             player.wait_for_playback()
         else:
             print("Failed to retrieve direct audio link.")
+def download_audio(video_url, path=None):
+    if path is None:
+        ydl_opts = {'format': 'bestaudio'}
+    else:
+        if not os.path.exists(path): 
+            os.makedirs(path) 
+        output_template = os.path.join(path, '%(title)s.%(ext)s')
+        ydl_opts = {
+            'quiet': True,
+            'noplaylist': True,
+            'format': 'bestaudio',
+            'outtmpl': output_template}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+
+
+
+                        
+
+            
+                

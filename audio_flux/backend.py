@@ -233,3 +233,9 @@ def adjust_track_speed(speed):
         player.speed = speed
     except Exception as e:
         print(f"Error adjusting track speed: {e}")
+
+def set_repeat_mode(enabled):
+    try:
+        player.loop_file = "inf" if enabled else "no"
+    except Exception as e:
+        print(f"Error changing repeat mode: {e}")

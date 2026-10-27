@@ -5,7 +5,7 @@ from mutagen import File
 
 player = mpv.MPV(ytdl=False)
 
-def search_youtube(query, limit=12):
+def search_youtube(query, limit=24):
     """Return YouTube search matches with the metadata needed by the UI."""
     query = (query or "").strip()
     if not query:
@@ -167,10 +167,10 @@ def scan_download_folder(path):
     audio_files = []
     if os.path.exists(folder):
         for filename in os.listdir(folder):
-            if filename.endswith((".mp3", ".m4a", ".mp4", ".webm", ".opus")):
+            if filename.lower().endswith((".mp3", ".m4a", ".mp4", ".webm", ".opus", ".wav", ".flac", ".aac", ".ogg")):
                 full_path = os.path.join(folder, filename)
                 audio_files.append((filename, full_path))
-    return audio_files
+    return sorted(audio_files, key=lambda item: item[0].lower())
 def pause_audio():
     try:
         player.pause = True

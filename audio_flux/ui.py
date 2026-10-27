@@ -19,6 +19,7 @@ from .backend import (
     pause_audio,
     play_audio,
     resume_audio,
+    scan_download_folder,
     search_youtube,
     volume_down,
     volume_up,
@@ -52,6 +53,11 @@ def main(page: ft.Page):
     selected_track = None
     is_paused = False
     duration_seconds = 0.0
+    current_view = "home"
+    current_search_query = ""
+    search_fetch_limit = 24
+    search_generation = 0
+    loaded_search_tracks = []
     settings_file = Path(os.environ.get("APPDATA") or Path.home()) / "AudioFlux" / "settings.json"
     try:
         saved_settings = json.loads(settings_file.read_text(encoding="utf-8"))
@@ -104,11 +110,16 @@ def main(page: ft.Page):
     search_progress = ft.ProgressRing(width=18, height=18, stroke_width=2, color=ACCENT, visible=False)
     results_summary = ft.Text("Search to see matching tracks", size=12, color=MUTED)
     results_list = ft.Column(spacing=8)
+    load_more_button = ft.OutlinedButton(
+        "Load more tracks", icon=ft.Icons.EXPAND_MORE_ROUNDED, visible=False,
+        on_click=lambda e: load_more_results(),
+    )
     results_panel = ft.Container(
         visible=False,
         content=ft.Column([
             ft.Row([ft.Text("Results", size=16, weight=ft.FontWeight.W_600, color="#F4F6FA"), results_summary], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             results_list,
+            ft.Row([load_more_button], alignment=ft.MainAxisAlignment.CENTER),
         ], spacing=12),
         padding=18, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
     )
@@ -132,9 +143,11 @@ def main(page: ft.Page):
         track_title.value = track.get("title") or "Audio stream"
         artist.value = f"By {track_info.get('artist') or track.get('artist') or 'Unknown artist'}"
         image_path = track_info.get("cover") or track.get("thumbnail")
-        if image_path:
+        if image_path and image_path != "placeholder.png":
             cover.content = ft.Image(src=image_path, width=184, height=184, fit=ft.BoxFit.COVER, border_radius=18)
-        status.value = "NOW PLAYING · YOUTUBE"
+        else:
+            cover.content = ft.Icon(ft.Icons.GRAPHIC_EQ, size=62, color=ACCENT)
+        status.value = "NOW PLAYING · DOWNLOADS" if track.get("mode") == "offline" else "NOW PLAYING · YOUTUBE"
         status.color = ACCENT
         play_button.icon = ft.Icons.PAUSE_ROUNDED
         pause_label.value = "PAUSE"
@@ -145,7 +158,7 @@ def main(page: ft.Page):
     def playback_worker(track):
         set_status(f"Loading {track.get('title') or 'track'}…", ACCENT)
         try:
-            track_info = audio_player("online", track["url"])
+            track_info = audio_player(track.get("mode", "online"), track["url"])
             update_track(track_info, track)
         except Exception as exc:
             set_status(f"Unable to play audio: {exc}", "#FF8A80")
@@ -155,6 +168,16 @@ def main(page: ft.Page):
             set_status("Choose a track from the search results", "#FFCC80")
             return
         set_status("Connecting…", ACCENT)
+        page.run_thread(playback_worker, track)
+
+    def play_local_file(path):
+        track = {
+            "title": Path(path).stem,
+            "artist": "Downloaded audio",
+            "url": path,
+            "mode": "offline",
+        }
+        set_status(f"Loading {track['title']}…", ACCENT)
         page.run_thread(playback_worker, track)
 
     def result_tile(track):
@@ -184,25 +207,57 @@ def main(page: ft.Page):
             padding=8, bgcolor=PANEL_SOFT, border_radius=12,
         )
 
-    def search_worker(query):
+    def search_worker(query, limit, append, request_id):
+        nonlocal loaded_search_tracks, search_fetch_limit
         try:
-            tracks = search_youtube(query)
-            if tracks:
-                results_summary.value = f"{len(tracks)} tracks for “{query}”"
-                results_list.controls = [result_tile(track) for track in tracks]
+            tracks = search_youtube(query, limit=limit)
+            if request_id != search_generation:
+                return
+            if append:
+                known_ids = {track.get("id") or track.get("url") for track in loaded_search_tracks}
+                for track in tracks:
+                    track_id = track.get("id") or track.get("url")
+                    if track_id not in known_ids:
+                        loaded_search_tracks.append(track)
+                        known_ids.add(track_id)
+            else:
+                loaded_search_tracks = tracks
+
+            search_fetch_limit = limit
+            if loaded_search_tracks:
+                results_summary.value = f"{len(loaded_search_tracks)} tracks for “{query}”"
+                results_list.controls = [result_tile(track) for track in loaded_search_tracks]
+                load_more_button.visible = limit < 120 and len(tracks) >= limit
+                load_more_button.disabled = False
+                load_more_button.content = "Load more tracks" if load_more_button.visible else "You've reached the end"
             else:
                 results_summary.value = f"No tracks found for “{query}”"
                 results_list.controls = [ft.Text("Try a different song or artist.", size=12, color=MUTED)]
-            results_panel.visible = True
+                load_more_button.visible = False
         except Exception as exc:
+            if request_id != search_generation:
+                return
             results_summary.value = "Search failed"
             results_list.controls = [ft.Text(str(exc), size=12, color="#FF8A80")]
-            results_panel.visible = True
         finally:
-            search_progress.visible = False
-            page.update()
+            if request_id == search_generation:
+                search_progress.visible = False
+                load_more_button.disabled = False
+                page.update()
+
+    def load_more_results():
+        nonlocal search_fetch_limit, search_generation
+        if not current_search_query or search_fetch_limit >= 120:
+            return
+        next_limit = min(search_fetch_limit + 24, 120)
+        search_generation += 1
+        load_more_button.disabled = True
+        search_progress.visible = True
+        page.update()
+        page.run_thread(search_worker, current_search_query, next_limit, True, search_generation)
 
     def start_search(e=None):
+        nonlocal current_search_query, search_fetch_limit, search_generation, loaded_search_tracks
         query = (search_input.value or "").strip()
         if not query:
             set_status("Type a song, artist, or album to search", "#FFCC80")
@@ -211,11 +266,18 @@ def main(page: ft.Page):
         quick_picks_panel.visible = False
         future_panel.visible = False
         results_panel.visible = True
+        current_search_query = query
+        search_fetch_limit = 24
+        loaded_search_tracks = []
+        search_generation += 1
+        request_id = search_generation
+        load_more_button.visible = False
+        load_more_button.disabled = True
         results_summary.value = f"Searching YouTube for “{query}”…"
         results_list.controls = [ft.Row([ft.ProgressRing(width=18, height=18, color=ACCENT), ft.Text("Finding tracks…", size=12, color=MUTED)], spacing=10)]
         search_progress.visible = True
         page.update()
-        page.run_thread(search_worker, query)
+        page.run_thread(search_worker, query, search_fetch_limit, False, request_id)
 
     def toggle_pause(e=None):
         nonlocal is_paused
@@ -302,6 +364,8 @@ def main(page: ft.Page):
         try:
             download_audio(source, folder or None)
             set_status("Download complete", ACCENT)
+            if current_view == "downloads":
+                refresh_downloads()
         except Exception as exc:
             set_status(f"Download failed: {exc}", "#FF8A80")
 
@@ -327,6 +391,8 @@ def main(page: ft.Page):
         download_directory = new_directory
         page.pop_dialog()
         set_status("Settings saved", ACCENT)
+        if current_view == "downloads":
+            refresh_downloads()
 
     def open_settings(e=None):
         download_folder.value = download_directory
@@ -384,12 +450,24 @@ def main(page: ft.Page):
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
+    home_nav = ft.TextButton(
+        "Home", icon=ft.Icons.HOME_ROUNDED, on_click=lambda e: switch_view("home"),
+    )
+    downloads_nav = ft.TextButton(
+        "Downloads", icon=ft.Icons.DOWNLOAD_OUTLINED, on_click=lambda e: switch_view("downloads"),
+    )
     top_bar = ft.Row(
-        [ft.Row([ft.Container(width=10, height=10, border_radius=50, bgcolor=ACCENT), ft.Text("AUDIO FLUX", size=12, weight=ft.FontWeight.W_700, color="#F4F6FA")], spacing=10),
-         ft.Row([
-             ft.Container(content=ft.Text("PLAYER  /  01", size=10, color=MUTED, weight=ft.FontWeight.W_700), padding=ft.Padding.symmetric(horizontal=12, vertical=8), bgcolor=PANEL, border_radius=30),
-             ft.IconButton(icon=ft.Icons.SETTINGS_OUTLINED, icon_color=MUTED, tooltip="Settings", on_click=open_settings),
-         ], spacing=8)],
+        [
+            ft.Row([
+                ft.Container(width=10, height=10, border_radius=50, bgcolor=ACCENT),
+                ft.Text("AUDIO FLUX", size=12, weight=ft.FontWeight.W_700, color="#F4F6FA"),
+            ], spacing=10),
+            ft.Row([
+                home_nav,
+                downloads_nav,
+                ft.IconButton(icon=ft.Icons.SETTINGS_OUTLINED, icon_color=MUTED, tooltip="Settings", on_click=open_settings),
+            ], spacing=4),
+        ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
     )
 
@@ -573,17 +651,96 @@ def main(page: ft.Page):
         padding=20, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
     )
 
-    page.add(ft.Column([
-        top_bar,
+    home_view = ft.Column([
         ft.Column([heading, subtitle], spacing=4),
         search_card,
         landing_panel,
         quick_picks_panel,
         future_panel,
         results_panel,
-        player_card,
         ft.Row([ft.Icon(ft.Icons.INFO_OUTLINE, size=14, color="#737B89"), ft.Text("Tracks are searched and streamed from YouTube using yt-dlp.", size=11, color="#737B89")], spacing=7),
-    ], spacing=20, expand=True, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
+    ], spacing=20, expand=True, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+
+    downloads_summary = ft.Text("", size=12, color=MUTED)
+    downloads_folder_label = ft.Text("", size=11, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+    downloads_list = ft.Column(spacing=8)
+
+    def download_tile(filename, path):
+        try:
+            size = os.path.getsize(path)
+            size_label = f"{size / (1024 * 1024):.1f} MB" if size >= 1024 * 1024 else f"{max(1, size // 1024)} KB"
+        except OSError:
+            size_label = "Audio file"
+        extension = Path(filename).suffix.removeprefix(".").upper() or "AUDIO"
+        return ft.Container(
+            content=ft.Row([
+                ft.Container(
+                    content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, size=22, color=ACCENT),
+                    width=52, height=52, border_radius=10, bgcolor="#26352D",
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Column([
+                    ft.Text(Path(filename).stem, size=13, color="#F4F6FA", weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(f"{extension} · {size_label}", size=11, color=MUTED),
+                ], spacing=4, expand=True),
+                ft.IconButton(icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, icon_color=ACCENT, tooltip="Play downloaded track", on_click=lambda e, target=path: play_local_file(target)),
+            ], spacing=12),
+            padding=9, bgcolor=PANEL_SOFT, border_radius=12,
+        )
+
+    def refresh_downloads(e=None):
+        folder = download_directory or os.getcwd()
+        downloads_folder_label.value = f"Folder · {folder}"
+        tracks = scan_download_folder(folder)
+        downloads_summary.value = f"{len(tracks)} tracks" if tracks else "No downloaded tracks yet"
+        if tracks:
+            downloads_list.controls = [download_tile(filename, path) for filename, path in tracks]
+        else:
+            downloads_list.controls = [ft.Container(
+                content=ft.Column([
+                    ft.Icon(ft.Icons.FOLDER_OPEN_OUTLINED, size=42, color="#617064"),
+                    ft.Text("Your downloads will show up here", size=15, color="#E4E8E3", weight=ft.FontWeight.W_600),
+                    ft.Text("Download a track from Home, then come back to play it anytime.", size=12, color=MUTED, text_align=ft.TextAlign.CENTER),
+                ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=42, bgcolor=PANEL, border_radius=18, alignment=ft.Alignment.CENTER,
+            )]
+        page.update()
+
+    downloads_view = ft.Column([
+        ft.Row([
+            ft.Column([
+                ft.Text("Your Downloads", size=28, color="#F4F6FA", weight=ft.FontWeight.W_700),
+                ft.Text("Play tracks saved on this device.", size=13, color=MUTED),
+            ], spacing=4, expand=True),
+            ft.OutlinedButton("Refresh", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_downloads),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        ft.Container(
+            content=ft.Row([ft.Icon(ft.Icons.FOLDER_OUTLINED, size=16, color=ACCENT), downloads_folder_label], spacing=9),
+            padding=ft.Padding.symmetric(horizontal=13, vertical=10), bgcolor=PANEL, border_radius=11,
+        ),
+        downloads_summary,
+        downloads_list,
+    ], spacing=16, expand=True, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+
+    main_content = ft.Container(content=home_view, expand=True)
+
+    def switch_view(view_name):
+        nonlocal current_view
+        current_view = view_name
+        if view_name == "downloads":
+            main_content.content = downloads_view
+            downloads_nav.style = ft.ButtonStyle(color=ACCENT)
+            home_nav.style = ft.ButtonStyle(color=MUTED)
+            refresh_downloads()
+        else:
+            main_content.content = home_view
+            home_nav.style = ft.ButtonStyle(color=ACCENT)
+            downloads_nav.style = ft.ButtonStyle(color=MUTED)
+        page.update()
+
+    home_nav.style = ft.ButtonStyle(color=ACCENT)
+    downloads_nav.style = ft.ButtonStyle(color=MUTED)
+    page.add(ft.Column([top_bar, player_card, main_content], spacing=16, expand=True))
 
     initial_volume = get_current_volume()
     if initial_volume is not None:

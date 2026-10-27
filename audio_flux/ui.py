@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from pathlib import Path
 
 import flet as ft
@@ -87,8 +88,17 @@ def main(page: ft.Page):
     seek_slider = ft.Slider(min=0, max=100, value=0, active_color=ACCENT, inactive_color="#343B47", on_change_end=lambda e: on_seek(e))
     volume_value = ft.Text("—", size=12, color=MUTED, width=36, text_align=ft.TextAlign.RIGHT)
     volume_slider = ft.Slider(min=0, max=100, value=50, active_color=ACCENT, inactive_color="#343B47", expand=True, on_change=lambda e: on_volume_change(e))
-    speed_value = ft.Text("1.00×", size=13, color=ACCENT, weight=ft.FontWeight.W_700, width=48, text_align=ft.TextAlign.RIGHT)
-    speed_slider = ft.Slider(min=0.5, max=2, divisions=30, value=1, active_color=ACCENT, inactive_color="#343B47", expand=True, on_change=lambda e: on_speed_change(e))
+    speed_options = ft.SegmentedButton(
+        segments=[
+            ft.Segment(value="1", label="1×"),
+            ft.Segment(value="1.5", label="1.5×"),
+            ft.Segment(value="2", label="2×"),
+        ],
+        selected=["1"],
+        allow_empty_selection=False,
+        show_selected_icon=False,
+        on_change=lambda e: on_speed_change(e),
+    )
     play_button = ft.IconButton(icon=ft.Icons.PLAY_ARROW_ROUNDED, icon_size=34, icon_color=BG, bgcolor=ACCENT, tooltip="Play / pause", on_click=lambda e: toggle_pause(e))
     pause_label = ft.Text("PLAY", size=10, color=MUTED, weight=ft.FontWeight.W_700)
     search_progress = ft.ProgressRing(width=18, height=18, stroke_width=2, color=ACCENT, visible=False)
@@ -117,6 +127,8 @@ def main(page: ft.Page):
         selected_track = track
         duration_seconds = 0.0
         is_paused = False
+        landing_panel.visible = False
+        player_card.visible = True
         track_title.value = track.get("title") or "Audio stream"
         artist.value = f"By {track_info.get('artist') or track.get('artist') or 'Unknown artist'}"
         image_path = track_info.get("cover") or track.get("thumbnail")
@@ -195,6 +207,9 @@ def main(page: ft.Page):
         if not query:
             set_status("Type a song, artist, or album to search", "#FFCC80")
             return
+        landing_panel.visible = False
+        quick_picks_panel.visible = False
+        future_panel.visible = False
         results_panel.visible = True
         results_summary.value = f"Searching YouTube for “{query}”…"
         results_list.controls = [ft.Row([ft.ProgressRing(width=18, height=18, color=ACCENT), ft.Text("Finding tracks…", size=12, color=MUTED)], spacing=10)]
@@ -224,19 +239,34 @@ def main(page: ft.Page):
             pause_label.value = "PLAY"
         page.update()
 
-    def stop_playback(e=None):
-        nonlocal current_source, is_paused
-        close_audio()
-        current_source = None
-        is_paused = False
+    async def return_to_discovery():
+        # Let the stop-button event finish before removing its parent control.
+        await asyncio.sleep(0.08)
+        if current_source is not None:
+            return
         play_button.icon = ft.Icons.PLAY_ARROW_ROUNDED
         pause_label.value = "PLAY"
         track_title.value = "Nothing playing yet"
         artist.value = "Search for a track to get started"
+        player_card.visible = False
+        landing_panel.visible = True
+        quick_picks_panel.visible = True
+        future_panel.visible = True
+        results_panel.visible = False
         seek_slider.value = 0
         elapsed.value = "0:00"
         total.value = "0:00"
-        set_status("Stopped", MUTED)
+        status.value = "STOPPED · READY WHEN YOU ARE"
+        status.color = MUTED
+        page.update()
+
+    def stop_playback(e=None):
+        nonlocal current_source, selected_track, is_paused
+        close_audio()
+        current_source = None
+        selected_track = None
+        is_paused = False
+        page.run_task(return_to_discovery)
 
     def on_seek(e):
         if duration_seconds > 0:
@@ -255,9 +285,9 @@ def main(page: ft.Page):
         page.update()
 
     def on_speed_change(e):
-        value = round(float(e.control.value), 2)
+        selected = e.control.selected or ["1"]
+        value = float(selected[0])
         adjust_track_speed(value)
-        speed_value.value = f"{value:.2f}×"
         page.update()
 
     def nudge_volume(direction):
@@ -321,8 +351,9 @@ def main(page: ft.Page):
                 volume_value.value = f"{int(volume)}%"
             speed = get_current_track_speed()
             if speed is not None:
-                speed_slider.value = speed
-                speed_value.value = f"{float(speed):.2f}×"
+                choices = (1.0, 1.5, 2.0)
+                nearest = min(choices, key=lambda choice: abs(choice - float(speed)))
+                speed_options.selected = [str(nearest).removesuffix(".0")]
             page.update()
             await asyncio.sleep(0.7)
 
@@ -367,16 +398,165 @@ def main(page: ft.Page):
             ft.Row([cover, ft.Column([status, track_title, artist], spacing=10, expand=True)], spacing=24, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Column([ft.Row([elapsed, total], alignment=ft.MainAxisAlignment.SPACE_BETWEEN), seek_slider], spacing=0),
             ft.Row([
-                ft.Container(width=42),
                 ft.IconButton(icon=ft.Icons.STOP_ROUNDED, icon_color=MUTED, icon_size=25, tooltip="Stop", on_click=stop_playback),
                 play_button,
                 ft.Column([pause_label], alignment=ft.MainAxisAlignment.CENTER),
-                ft.Container(expand=True),
-                ft.Row([ft.Icon(ft.Icons.VOLUME_DOWN_ROUNDED, color=MUTED, size=18), ft.IconButton(icon=ft.Icons.REMOVE, icon_size=16, icon_color=MUTED, tooltip="Volume down", on_click=lambda e: nudge_volume(-1)), volume_slider, ft.IconButton(icon=ft.Icons.ADD, icon_size=16, icon_color=MUTED, tooltip="Volume up", on_click=lambda e: nudge_volume(1)), volume_value], spacing=2, width=290),
             ], alignment=ft.MainAxisAlignment.CENTER, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([
+                ft.Row([
+                    ft.Text("SPEED", size=10, color=MUTED, weight=ft.FontWeight.W_700),
+                    speed_options,
+                ], spacing=10),
+                ft.Row([
+                    ft.Icon(ft.Icons.VOLUME_DOWN_ROUNDED, color=MUTED, size=18),
+                    ft.IconButton(icon=ft.Icons.REMOVE, icon_size=16, icon_color=MUTED, tooltip="Volume down", on_click=lambda e: nudge_volume(-1)),
+                    volume_slider,
+                    ft.IconButton(icon=ft.Icons.ADD, icon_size=16, icon_color=MUTED, tooltip="Volume up", on_click=lambda e: nudge_volume(1)),
+                    volume_value,
+                ], spacing=2, width=290),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=24),
-        padding=24, bgcolor=PANEL, border_radius=22, border=ft.Border.all(1, "#252B36"),
+        visible=False, padding=24, bgcolor=PANEL, border_radius=22, border=ft.Border.all(1, "#252B36"),
     )
+
+    waveform_heights = [48, 84, 62, 112, 72, 132, 88, 54, 104, 66, 42]
+    waveform = ft.Row([
+        ft.Container(
+            width=9, height=height, border_radius=8,
+            bgcolor=ACCENT if index in (3, 5, 8) else "#526B50",
+        )
+        for index, height in enumerate(waveform_heights)
+    ], spacing=7, alignment=ft.MainAxisAlignment.CENTER, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    landing_panel = ft.Container(
+        content=ft.Row([
+            ft.Column([
+                ft.Text("A LITTLE LESS ALGORITHM. A LOT MORE YOU.", size=10, color=ACCENT, weight=ft.FontWeight.W_700),
+                ft.Text("Your next favorite\nis one search away.", size=31, height=82, color="#F4F6FA", weight=ft.FontWeight.W_700),
+                ft.Text("Find the songs you love, then stream or save\nthem straight from your library.", size=13, color="#AAB2B9", height=42),
+                ft.Row([
+                    ft.Icon(ft.Icons.SEARCH_ROUNDED, size=15, color=ACCENT),
+                    ft.Text("SEARCH", size=9, color="#E5EADF", weight=ft.FontWeight.W_700),
+                    ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, size=15, color=ACCENT),
+                    ft.Text("STREAM", size=9, color="#E5EADF", weight=ft.FontWeight.W_700),
+                    ft.Icon(ft.Icons.DOWNLOAD_OUTLINED, size=14, color=ACCENT),
+                    ft.Text("SAVE", size=9, color="#E5EADF", weight=ft.FontWeight.W_700),
+                ], spacing=7),
+            ], spacing=14, expand=True),
+            ft.Container(
+                content=ft.Column([
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.HEADPHONES_ROUNDED, size=48, color="#E7F1D8"),
+                        width=116, height=116, border_radius=58, bgcolor="#29372D",
+                        alignment=ft.Alignment.CENTER,
+                        border=ft.Border.all(1, "#526B50"),
+                    ),
+                    waveform,
+                    ft.Text("TUNE IN TO YOUR TASTE", size=9, color="#AAB2B9", weight=ft.FontWeight.W_700),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, alignment=ft.MainAxisAlignment.CENTER, spacing=14),
+                width=230, height=220, bgcolor="#121A18", border_radius=18,
+                alignment=ft.Alignment.CENTER,
+            ),
+        ], spacing=28, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=28, border_radius=22,
+        gradient=ft.LinearGradient(
+            begin=ft.Alignment.TOP_LEFT,
+            end=ft.Alignment.BOTTOM_RIGHT,
+            colors=["#26352D", "#19221F", "#151A20"],
+        ),
+        border=ft.Border.all(1, "#35443A"),
+    )
+    quick_pick_searches = [
+        "official music videos",
+        "indie music official video",
+        "classic soul official audio",
+        "afrobeats official music video",
+        "rock songs official audio",
+        "pop music video official",
+        "jazz performance official",
+        "alternative music official audio",
+    ]
+    quick_pick_list = ft.Column(spacing=8)
+    quick_pick_status = ft.Text("Finding a few tracks for you…", size=11, color=MUTED)
+    quick_pick_progress = ft.ProgressRing(width=16, height=16, stroke_width=2, color=ACCENT, visible=True)
+
+    def quick_pick_worker(query):
+        try:
+            candidates = search_youtube(query, limit=30)
+            candidates = [
+                track for track in candidates
+                if track.get("url") and track.get("thumbnail")
+                and (track.get("duration") is None or 60 <= track["duration"] <= 900)
+            ]
+            if candidates:
+                tracks = random.sample(candidates, min(6, len(candidates)))
+                quick_pick_list.controls = [result_tile(track) for track in tracks]
+                quick_pick_status.value = f"Fresh tracks from YouTube · {query}"
+            else:
+                quick_pick_list.controls = [ft.Text("No fresh tracks found. Shuffle to try again.", size=12, color=MUTED)]
+                quick_pick_status.value = "No tracks found"
+        except Exception as exc:
+            quick_pick_list.controls = [ft.Text(f"Quick picks couldn't load: {exc}", size=12, color="#FF8A80")]
+            quick_pick_status.value = "Search unavailable"
+        finally:
+            quick_pick_progress.visible = False
+            page.update()
+
+    def shuffle_quick_picks(e=None):
+        quick_pick_status.value = "Finding fresh tracks…"
+        quick_pick_progress.visible = True
+        quick_pick_list.controls = [ft.Row([
+            ft.ProgressRing(width=18, height=18, color=ACCENT),
+            ft.Text("Loading real tracks and cover art…", size=12, color=MUTED),
+        ], spacing=10)]
+        page.update()
+        page.run_thread(quick_pick_worker, random.choice(quick_pick_searches))
+
+    quick_picks_panel = ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Column([
+                    ft.Text("Quick Picks", size=17, color="#F4F6FA", weight=ft.FontWeight.W_600),
+                    quick_pick_status,
+                ], spacing=3),
+                ft.Row([
+                    quick_pick_progress,
+                    ft.TextButton("Shuffle", icon=ft.Icons.SHUFFLE_ROUNDED, on_click=shuffle_quick_picks),
+                ], spacing=8),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            quick_pick_list,
+        ], spacing=14),
+        padding=18, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
+    )
+
+    def future_shelf(title, description, icon):
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(icon, size=18, color=ACCENT),
+                    ft.Text(title, size=14, color="#F4F6FA", weight=ft.FontWeight.W_600, expand=True),
+                    ft.Container(
+                        content=ft.Text("COMING SOON", size=8, color="#AAB2B9", weight=ft.FontWeight.W_700),
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=5),
+                        bgcolor="#242B32", border_radius=20,
+                    ),
+                ], spacing=8),
+                ft.Text(description, size=11, color=MUTED),
+                ft.Container(height=4),
+                ft.Row([
+                    ft.Container(width=34, height=34, border_radius=7, bgcolor="#202630"),
+                    ft.Container(width=34, height=34, border_radius=7, bgcolor="#202630"),
+                    ft.Container(width=34, height=34, border_radius=7, bgcolor="#202630"),
+                    ft.Text("Your tracks will live here", size=10, color="#737B89"),
+                ], spacing=8),
+            ], spacing=11),
+            expand=True, padding=17, bgcolor=PANEL, border_radius=17,
+            border=ft.Border.all(1, "#252B36"),
+        )
+
+    future_panel = ft.Row([
+        future_shelf("Forgotten Favorites", "Rediscover songs you haven't heard in a while.", ft.Icons.HISTORY_ROUNDED),
+        future_shelf("Keep Listening", "Pick up where your last listening session left off.", ft.Icons.QUEUE_MUSIC_ROUNDED),
+    ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
 
     search_card = ft.Container(
         content=ft.Column([
@@ -393,22 +573,15 @@ def main(page: ft.Page):
         padding=20, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
     )
 
-    settings_card = ft.Container(
-        content=ft.Column([
-            ft.Row([ft.Icon(ft.Icons.TUNE_ROUNDED, color=ACCENT, size=18), ft.Text("Fine-tune", size=15, weight=ft.FontWeight.W_600, color="#F4F6FA")], spacing=9),
-            ft.Row([ft.Text("Playback speed", size=12, color=MUTED), speed_slider, speed_value], spacing=12),
-            ft.Text("0.5× slower                                  2× faster", size=10, color="#737B89"),
-        ], spacing=10),
-        padding=18, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
-    )
-
     page.add(ft.Column([
         top_bar,
         ft.Column([heading, subtitle], spacing=4),
         search_card,
+        landing_panel,
+        quick_picks_panel,
+        future_panel,
         results_panel,
         player_card,
-        settings_card,
         ft.Row([ft.Icon(ft.Icons.INFO_OUTLINE, size=14, color="#737B89"), ft.Text("Tracks are searched and streamed from YouTube using yt-dlp.", size=11, color="#737B89")], spacing=7),
     ], spacing=20, expand=True, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
 
@@ -418,6 +591,8 @@ def main(page: ft.Page):
         volume_value.value = f"{int(initial_volume)}%"
     initial_speed = get_current_track_speed()
     if initial_speed is not None:
-        speed_slider.value = initial_speed
-        speed_value.value = f"{float(initial_speed):.2f}×"
+        choices = (1.0, 1.5, 2.0)
+        nearest = min(choices, key=lambda choice: abs(choice - float(initial_speed)))
+        speed_options.selected = [str(nearest).removesuffix(".0")]
     page.update()
+    shuffle_quick_picks()

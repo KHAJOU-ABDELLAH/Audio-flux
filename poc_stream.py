@@ -50,7 +50,7 @@ def download_audio(video_url, path=None):
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
-        
+
 def audio_player(mode, source_path_or_url):
     chosen_artist = "Unknown Artist"
     image_target = "placeholder.png"
@@ -124,3 +124,65 @@ def scan_download_folder(path):
                 full_path = os.path.join(folder, filename)
                 audio_files.append((filename, full_path))
     return audio_files
+def pause_audio():
+    try:
+        player.pause = True
+    except Exception as e:
+        print(f"Error pausing audio: {e}")
+def resume_audio():
+    try:
+        player.pause = False
+    except Exception as e:
+        print(f"Error resuming audio: {e}")
+def close_audio():
+    try:
+        player.stop()
+    except Exception as e:
+        print(f"Error stopping audio: {e}")
+def volume_up():
+    try:
+        if player.volume <= 95:
+            player.volume += 5
+    except Exception as e:
+        print(f"Error increasing volume: {e}")
+def volume_down():
+    try:
+        if player.volume >= 5:
+            player.volume -= 5
+    except Exception as e:
+        print(f"Error decreasing volume: {e}")
+def get_current_volume():
+    try:
+        return player.volume
+    except Exception as e:
+        print(f"Error getting current volume: {e}")
+        return None
+def current_time():
+    try:
+        return player.time_pos
+    except Exception as e:
+        print(f"Error getting current time: {e}")
+        return None
+def adjust_current_time(seconds):
+    try:
+        if player.time_pos is not None:
+            player.time_pos = seconds
+    except Exception as e:
+        print(f"Error adjusting current time: {e}")
+def get_audio_duration():
+    try:
+        return player.duration
+    except Exception as e:
+        print(f"Error getting audio duration: {e}")
+        return None
+def get_current_track_speed():
+    try:
+        return player.speed
+    except Exception as e:
+        print(f"Error getting current track speed: {e}")
+        return None
+def adjust_track_speed(speed):
+    try:
+        player.speed = speed
+    except Exception as e:
+        print(f"Error adjusting track speed: {e}")

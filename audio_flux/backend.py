@@ -1,6 +1,13 @@
 import yt_dlp
 import mpv
 import os
+import json
+import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from mutagen import File
 
 player = mpv.MPV(ytdl=False)
@@ -50,6 +57,91 @@ def search_youtube(query, limit=24):
             "url": video_url,
         })
     return tracks
+
+
+def get_track_lyrics(track_name, artist_name=None, duration=None):
+    """Fetch a best-match lyrics record from LRCLIB, preferring exact metadata."""
+    track_name = (track_name or "").strip()
+    artist_name = (artist_name or "").strip()
+    if not track_name:
+        return None
+
+    headers = {"User-Agent": "AudioFlux/1.0 (https://github.com/KHAJOU-ABDELLAH/Audio-flux)"}
+
+    class ServiceBusy(RuntimeError):
+        def __init__(self, status, retry_after):
+            super().__init__(f"Lyrics service returned HTTP {status}")
+            self.retry_after = retry_after
+
+    def wait_before_retry(value):
+        if not value:
+            time.sleep(1)
+            return
+        try:
+            delay = max(0.0, float(value))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                delay = 1.0
+        time.sleep(delay)
+
+    def fetch_json(url):
+        request = Request(url, headers=headers)
+        try:
+            with urlopen(request, timeout=10) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code == 404:
+                return None
+            if exc.code == 429:
+                retry_after = exc.headers.get("Retry-After", "a little while")
+                raise RuntimeError(f"Lyrics service rate limit; retry after {retry_after} seconds") from exc
+            if 500 <= exc.code < 600:
+                raise ServiceBusy(exc.code, exc.headers.get("Retry-After")) from exc
+            raise RuntimeError(f"Lyrics service returned HTTP {exc.code}") from exc
+
+    def fetch_with_retry(url):
+        for attempt in range(2):
+            try:
+                return fetch_json(url)
+            except ServiceBusy as exc:
+                # Honor the server's Retry-After before retrying or falling back.
+                wait_before_retry(exc.retry_after)
+                if attempt == 1:
+                    raise
+
+    record = None
+    if artist_name:
+        exact_params = {"track_name": track_name, "artist_name": artist_name}
+        if duration and 1 <= float(duration) <= 3600:
+            exact_params["duration"] = round(float(duration))
+        exact_url = f"https://lrclib.net/api/get?{urlencode(exact_params)}"
+        try:
+            record = fetch_with_retry(exact_url)
+        except ServiceBusy:
+            record = None
+    if record and (record.get("syncedLyrics") or record.get("plainLyrics")):
+        return record
+
+    search_params = {"track_name": track_name}
+    if artist_name:
+        search_params["artist_name"] = artist_name
+    if artist_name:
+        time.sleep(0.25)
+    try:
+        matches = fetch_with_retry(f"https://lrclib.net/api/search?{urlencode(search_params)}") or []
+    except ServiceBusy as exc:
+        raise RuntimeError("Lyrics service is temporarily unavailable. Try again shortly.") from exc
+    if not isinstance(matches, list):
+        return None
+    for match in matches:
+        if match.get("syncedLyrics") or match.get("plainLyrics"):
+            return match
+    return None
 
 
 def stream_audio_from_youtube(video_url):

@@ -1,19 +1,95 @@
-import yt_dlp
-import mpv
-import os
 import json
+import os
+import re
+import shutil
 import time
-from email.utils import parsedate_to_datetime
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
+
+import mpv
+import yt_dlp
 from mutagen import File
 
-player = mpv.MPV(ytdl=False)
+try:
+    player = mpv.MPV(ytdl=False)
+    player.volume = 50
+except Exception as exc:
+    raise RuntimeError(
+        "Audio Flux needs libmpv. Install mpv and make sure it is available on PATH."
+    ) from exc
+
+
+def resolve_ffmpeg_location():
+    """Return an ffmpeg directory yt-dlp can use, or None to search PATH."""
+    explicit = os.environ.get("AUDIO_FLUX_FFMPEG")
+    if explicit:
+        path = Path(explicit)
+        if path.is_file():
+            return str(path.parent)
+        if path.is_dir():
+            return str(path)
+    found = shutil.which("ffmpeg")
+    return str(Path(found).parent) if found else None
+
+
+def looks_like_youtube_url(query):
+    lowered = (query or "").strip().lower()
+    return any(token in lowered for token in ("youtube.com/", "youtu.be/", "music.youtube.com/"))
+
+
+def _entry_to_track(entry):
+    if not entry:
+        return None
+    video_id = entry.get("id")
+    video_url = entry.get("webpage_url") or entry.get("original_url")
+    if not video_url:
+        candidate = entry.get("url")
+        video_url = candidate if candidate and str(candidate).startswith("http") else None
+    if not video_url and video_id and entry.get("ie_key") in (None, "Youtube"):
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+    if not video_url:
+        return None
+
+    thumbnails = entry.get("thumbnails") or []
+    best_thumbnail = max(
+        thumbnails,
+        key=lambda image: (image.get("width") or 0) * (image.get("height") or 0),
+        default={},
+    )
+    return {
+        "id": video_id or video_url,
+        "title": entry.get("title") or "Untitled video",
+        "artist": entry.get("artist") or entry.get("creator") or entry.get("uploader") or "Unknown artist",
+        "thumbnail": best_thumbnail.get("url") or entry.get("thumbnail"),
+        "duration": entry.get("duration"),
+        "url": video_url,
+    }
+
+
+def _tracks_from_info(info, limit=None):
+    if not info:
+        return []
+    entries = info.get("entries")
+    if entries is None:
+        track = _entry_to_track(info)
+        return [track] if track else []
+    tracks = []
+    for entry in entries:
+        track = _entry_to_track(entry)
+        if track:
+            tracks.append(track)
+        if limit and len(tracks) >= limit:
+            break
+    return tracks
+
 
 def search_youtube(query, limit=24):
-    """Return YouTube search matches with the metadata needed by the UI."""
+    """Return YouTube matches, including a pasted watch or playlist URL."""
     query = (query or "").strip()
     if not query:
         return []
@@ -22,49 +98,112 @@ def search_youtube(query, limit=24):
         "quiet": True,
         "skip_download": True,
         "extract_flat": "in_playlist",
-        "noplaylist": True,
+        "noplaylist": not (looks_like_youtube_url(query) and "/playlist" in query.lower()),
     }
+    target = query if looks_like_youtube_url(query) else f"ytsearch{limit}:{query}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        search_info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        search_info = ydl.extract_info(target, download=False)
+    return _tracks_from_info(search_info, limit=limit)
 
-    tracks = []
-    for entry in (search_info or {}).get("entries", []):
-        if not entry:
+
+def _youtube_music_lyrics(video_id, track_name, artist_name):
+    """Return YouTube Music lyrics, preserving timestamps where available."""
+    try:
+        from ytmusicapi import YTMusic
+    except ImportError:
+        return None
+
+    try:
+        client = YTMusic()
+    except Exception:
+        return None
+    candidates = []
+    seen = set()
+    if video_id:
+        candidates.append(video_id)
+        seen.add(video_id)
+
+    queries = list(dict.fromkeys(
+        query for query in (
+            " ".join(part for part in (artist_name, track_name) if part).strip(),
+            track_name,
+        ) if query
+    ))
+    wanted_title = re.sub(r"[^a-z0-9]+", " ", track_name.lower()).strip()
+    for query in queries:
+        try:
+            results = client.search(query, filter="songs", limit=5)
+        except Exception:
             continue
-        video_id = entry.get("id")
-        video_url = entry.get("webpage_url") or entry.get("original_url")
-        if not video_url:
-            candidate = entry.get("url")
-            video_url = candidate if candidate and str(candidate).startswith("http") else None
-        if not video_url and video_id:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-        if not video_url:
+        if not isinstance(results, list):
             continue
+        for result in results:
+            try:
+                candidate_id = result.get("videoId")
+                if not candidate_id or candidate_id in seen:
+                    continue
+                result_title = re.sub(r"[^a-z0-9]+", " ", (result.get("title") or "").lower()).strip()
+                title_match = SequenceMatcher(None, wanted_title, result_title).ratio()
+                wanted_words = set(wanted_title.split())
+                overlap = len(wanted_words.intersection(result_title.split())) / max(1, len(wanted_words))
+                if wanted_title and title_match < 0.48 and overlap < 0.6:
+                    continue
+                candidates.append(candidate_id)
+                seen.add(candidate_id)
+            except (AttributeError, TypeError):
+                continue
 
-        thumbnails = entry.get("thumbnails") or []
-        best_thumbnail = max(
-            thumbnails,
-            key=lambda image: (image.get("width") or 0) * (image.get("height") or 0),
-            default={},
-        )
-        thumbnail = best_thumbnail.get("url") or entry.get("thumbnail")
-        tracks.append({
-            "id": video_id or video_url,
-            "title": entry.get("title") or "Untitled video",
-            "artist": entry.get("artist") or entry.get("creator") or entry.get("uploader") or "Unknown artist",
-            "thumbnail": thumbnail,
-            "duration": entry.get("duration"),
-            "url": video_url,
-        })
-    return tracks
+    plain_fallback = None
+    for candidate_id in candidates:
+        try:
+            watch = client.get_watch_playlist(videoId=candidate_id, limit=1)
+            browse_id = watch.get("lyrics") if isinstance(watch, dict) else None
+            if not browse_id:
+                continue
+            lyrics = client.get_lyrics(browse_id, timestamps=True)
+            if not lyrics:
+                continue
+            if lyrics.get("hasTimestamps"):
+                lines = lyrics.get("lyrics") or []
+                synced = []
+                for line in lines:
+                    start_ms = line.get("start_time") if isinstance(line, dict) else getattr(line, "start_time", None)
+                    line_text = line.get("text") if isinstance(line, dict) else getattr(line, "text", None)
+                    if start_ms is None or not line_text:
+                        continue
+                    centiseconds = max(0, int(start_ms)) // 10
+                    minutes, remainder = divmod(centiseconds, 6000)
+                    seconds, fraction = divmod(remainder, 100)
+                    synced.append(f"[{minutes:02d}:{seconds:02d}.{fraction:02d}]{line_text.strip()}")
+                if synced:
+                    return {
+                        "syncedLyrics": "\n".join(synced),
+                        "plainLyrics": None,
+                        "source": lyrics.get("source") or "YouTube Music",
+                    }
+            else:
+                text = lyrics.get("lyrics")
+                if isinstance(text, str) and text.strip() and plain_fallback is None:
+                    plain_fallback = {
+                        "plainLyrics": text.strip(),
+                        "syncedLyrics": None,
+                        "source": lyrics.get("source") or "YouTube Music",
+                    }
+        except Exception:
+            continue
+    return plain_fallback
 
 
-def get_track_lyrics(track_name, artist_name=None, duration=None):
-    """Fetch a best-match lyrics record from LRCLIB, preferring exact metadata."""
+def get_track_lyrics(track_name, artist_name=None, duration=None, video_id=None):
+    """Try timed sources first, then broaden coverage with plain-text lyrics."""
     track_name = (track_name or "").strip()
     artist_name = (artist_name or "").strip()
     if not track_name:
         return None
+
+    youtube_record = _youtube_music_lyrics(video_id, track_name, artist_name)
+    if youtube_record and youtube_record.get("syncedLyrics"):
+        return youtube_record
 
     headers = {"User-Agent": "AudioFlux/1.0 (https://github.com/KHAJOU-ABDELLAH/Audio-flux)"}
 
@@ -89,10 +228,10 @@ def get_track_lyrics(track_name, artist_name=None, duration=None):
                 delay = 1.0
         time.sleep(delay)
 
-    def fetch_json(url):
+    def fetch_json(url, timeout=10):
         request = Request(url, headers=headers)
         try:
-            with urlopen(request, timeout=10) as response:
+            with urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             if exc.code == 404:
@@ -115,6 +254,7 @@ def get_track_lyrics(track_name, artist_name=None, duration=None):
                     raise
 
     record = None
+    lrclib_unavailable = False
     if artist_name:
         exact_params = {"track_name": track_name, "artist_name": artist_name}
         if duration and 1 <= float(duration) <= 3600:
@@ -123,8 +263,14 @@ def get_track_lyrics(track_name, artist_name=None, duration=None):
         try:
             record = fetch_with_retry(exact_url)
         except ServiceBusy:
+            lrclib_unavailable = True
             record = None
-    if record and (record.get("syncedLyrics") or record.get("plainLyrics")):
+        except Exception:
+            if youtube_record:
+                return youtube_record
+            record = None
+    if record and record.get("syncedLyrics"):
+        record["source"] = "LRCLIB"
         return record
 
     search_params = {"track_name": track_name}
@@ -134,13 +280,81 @@ def get_track_lyrics(track_name, artist_name=None, duration=None):
         time.sleep(0.25)
     try:
         matches = fetch_with_retry(f"https://lrclib.net/api/search?{urlencode(search_params)}") or []
-    except ServiceBusy as exc:
-        raise RuntimeError("Lyrics service is temporarily unavailable. Try again shortly.") from exc
+    except Exception as exc:
+        lrclib_unavailable = True
+        matches = []
     if not isinstance(matches, list):
         return None
     for match in matches:
-        if match.get("syncedLyrics") or match.get("plainLyrics"):
+        if match.get("syncedLyrics"):
+            match["source"] = "LRCLIB"
             return match
+    if record and record.get("plainLyrics"):
+        record["source"] = "LRCLIB"
+        return record
+    if isinstance(matches, list):
+        for match in matches:
+            if match.get("plainLyrics"):
+                match["source"] = "LRCLIB"
+                return match
+
+    # LRCLIB specializes in timestamped community lyrics; Lyrics.ovh can
+    # provide a plain-text fallback for tracks absent from its catalog.
+    def fetch_lyrics_ovh(artist, title):
+        if not artist or not title:
+            return None
+        lyrics_url = (
+            f"https://api.lyrics.ovh/v1/{quote(artist, safe='')}/"
+            f"{quote(title, safe='')}"
+        )
+        try:
+            lyrics_record = fetch_json(lyrics_url, timeout=5)
+        except Exception:
+            return None
+        if isinstance(lyrics_record, dict) and lyrics_record.get("lyrics", "").strip():
+            return {
+                "syncedLyrics": None,
+                "plainLyrics": lyrics_record["lyrics"].strip(),
+                "source": "Lyrics.ovh",
+            }
+        return None
+
+    if artist_name and artist_name.casefold() not in {"unknown artist", "downloaded audio"}:
+        lyrics_ovh_record = fetch_lyrics_ovh(artist_name, track_name)
+        if lyrics_ovh_record:
+            return lyrics_ovh_record
+
+    # Resolve uploader-style YouTube artist names through the service's Deezer
+    # suggestions, then retry its lyrics endpoint with canonical metadata.
+    try:
+        search_query = " ".join(part for part in (artist_name, track_name) if part)
+        suggestions = fetch_json(
+            f"https://api.lyrics.ovh/suggest/{quote(search_query, safe='')}", timeout=5
+        )
+    except Exception:
+        suggestions = None
+    candidates = suggestions.get("data", []) if isinstance(suggestions, dict) else []
+    seen_lyrics_queries = set()
+    for candidate in candidates[:3] if isinstance(candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        suggested_title = (candidate.get("title") or "").strip()
+        artist_data = candidate.get("artist")
+        suggested_artist = (
+            str(artist_data.get("name") or "").strip() if isinstance(artist_data, dict) else ""
+        )
+        query_key = (suggested_artist.casefold(), suggested_title.casefold())
+        if not suggested_title or not suggested_artist or query_key in seen_lyrics_queries:
+            continue
+        seen_lyrics_queries.add(query_key)
+        lyrics_ovh_record = fetch_lyrics_ovh(suggested_artist, suggested_title)
+        if lyrics_ovh_record:
+            return lyrics_ovh_record
+
+    if youtube_record:
+        return youtube_record
+    if lrclib_unavailable:
+        raise RuntimeError("Lyrics sources are temporarily unavailable. Try again shortly.")
     return None
 
 
@@ -165,8 +379,6 @@ def stream_audio_from_youtube(video_url):
             best_thumbnail = thumbnail_list[-1]
             image_url = best_thumbnail.get('url') or image_url
 
-        print(f"Direct Audio Link:\n{direct_audio_url}")
-
     return chosen_artist, direct_audio_url, image_url
 
 def download_audio(video_url, path=None):
@@ -177,16 +389,17 @@ def download_audio(video_url, path=None):
     ydl_opts = {
         'quiet': True,
         'noplaylist': True,
-        # Changed from 'bestaudio' to prefer m4a (supports thumbnails)
         'format': 'm4a/bestaudio/best',
         'outtmpl': output_template,
-        'writethumbnail': True,
-        'ffmpeg_location': r"C:\Users\Abdellah\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin",
-        'postprocessors': [
-            {'key': 'FFmpegMetadata'},
-            {'key': 'EmbedThumbnail'}
-        ]
     }
+    ffmpeg_dir = resolve_ffmpeg_location()
+    if ffmpeg_dir:
+        ydl_opts['ffmpeg_location'] = ffmpeg_dir
+        ydl_opts['writethumbnail'] = True
+        ydl_opts['postprocessors'] = [
+            {'key': 'FFmpegMetadata'},
+            {'key': 'EmbedThumbnail'},
+        ]
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
 

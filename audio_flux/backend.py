@@ -1,19 +1,93 @@
-import yt_dlp
-import mpv
-import os
 import json
+import os
+import shutil
 import time
-from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+import mpv
+import yt_dlp
 from mutagen import File
 
-player = mpv.MPV(ytdl=False)
+try:
+    player = mpv.MPV(ytdl=False)
+    player.volume = 50
+except Exception as exc:
+    raise RuntimeError(
+        "Audio Flux needs libmpv. Install mpv and make sure it is available on PATH."
+    ) from exc
+
+
+def resolve_ffmpeg_location():
+    """Return an ffmpeg directory yt-dlp can use, or None to search PATH."""
+    explicit = os.environ.get("AUDIO_FLUX_FFMPEG")
+    if explicit:
+        path = Path(explicit)
+        if path.is_file():
+            return str(path.parent)
+        if path.is_dir():
+            return str(path)
+    found = shutil.which("ffmpeg")
+    return str(Path(found).parent) if found else None
+
+
+def looks_like_youtube_url(query):
+    lowered = (query or "").strip().lower()
+    return any(token in lowered for token in ("youtube.com/", "youtu.be/", "music.youtube.com/"))
+
+
+def _entry_to_track(entry):
+    if not entry:
+        return None
+    video_id = entry.get("id")
+    video_url = entry.get("webpage_url") or entry.get("original_url")
+    if not video_url:
+        candidate = entry.get("url")
+        video_url = candidate if candidate and str(candidate).startswith("http") else None
+    if not video_url and video_id and entry.get("ie_key") in (None, "Youtube"):
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+    if not video_url:
+        return None
+
+    thumbnails = entry.get("thumbnails") or []
+    best_thumbnail = max(
+        thumbnails,
+        key=lambda image: (image.get("width") or 0) * (image.get("height") or 0),
+        default={},
+    )
+    return {
+        "id": video_id or video_url,
+        "title": entry.get("title") or "Untitled video",
+        "artist": entry.get("artist") or entry.get("creator") or entry.get("uploader") or "Unknown artist",
+        "thumbnail": best_thumbnail.get("url") or entry.get("thumbnail"),
+        "duration": entry.get("duration"),
+        "url": video_url,
+    }
+
+
+def _tracks_from_info(info, limit=None):
+    if not info:
+        return []
+    entries = info.get("entries")
+    if entries is None:
+        track = _entry_to_track(info)
+        return [track] if track else []
+    tracks = []
+    for entry in entries:
+        track = _entry_to_track(entry)
+        if track:
+            tracks.append(track)
+        if limit and len(tracks) >= limit:
+            break
+    return tracks
+
 
 def search_youtube(query, limit=24):
-    """Return YouTube search matches with the metadata needed by the UI."""
+    """Return YouTube matches, including a pasted watch or playlist URL."""
     query = (query or "").strip()
     if not query:
         return []
@@ -22,41 +96,12 @@ def search_youtube(query, limit=24):
         "quiet": True,
         "skip_download": True,
         "extract_flat": "in_playlist",
-        "noplaylist": True,
+        "noplaylist": not (looks_like_youtube_url(query) and "/playlist" in query.lower()),
     }
+    target = query if looks_like_youtube_url(query) else f"ytsearch{limit}:{query}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        search_info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-
-    tracks = []
-    for entry in (search_info or {}).get("entries", []):
-        if not entry:
-            continue
-        video_id = entry.get("id")
-        video_url = entry.get("webpage_url") or entry.get("original_url")
-        if not video_url:
-            candidate = entry.get("url")
-            video_url = candidate if candidate and str(candidate).startswith("http") else None
-        if not video_url and video_id:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-        if not video_url:
-            continue
-
-        thumbnails = entry.get("thumbnails") or []
-        best_thumbnail = max(
-            thumbnails,
-            key=lambda image: (image.get("width") or 0) * (image.get("height") or 0),
-            default={},
-        )
-        thumbnail = best_thumbnail.get("url") or entry.get("thumbnail")
-        tracks.append({
-            "id": video_id or video_url,
-            "title": entry.get("title") or "Untitled video",
-            "artist": entry.get("artist") or entry.get("creator") or entry.get("uploader") or "Unknown artist",
-            "thumbnail": thumbnail,
-            "duration": entry.get("duration"),
-            "url": video_url,
-        })
-    return tracks
+        search_info = ydl.extract_info(target, download=False)
+    return _tracks_from_info(search_info, limit=limit)
 
 
 def get_track_lyrics(track_name, artist_name=None, duration=None):
@@ -165,8 +210,6 @@ def stream_audio_from_youtube(video_url):
             best_thumbnail = thumbnail_list[-1]
             image_url = best_thumbnail.get('url') or image_url
 
-        print(f"Direct Audio Link:\n{direct_audio_url}")
-
     return chosen_artist, direct_audio_url, image_url
 
 def download_audio(video_url, path=None):
@@ -177,16 +220,17 @@ def download_audio(video_url, path=None):
     ydl_opts = {
         'quiet': True,
         'noplaylist': True,
-        # Changed from 'bestaudio' to prefer m4a (supports thumbnails)
         'format': 'm4a/bestaudio/best',
         'outtmpl': output_template,
-        'writethumbnail': True,
-        'ffmpeg_location': r"C:\Users\Abdellah\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin",
-        'postprocessors': [
-            {'key': 'FFmpegMetadata'},
-            {'key': 'EmbedThumbnail'}
-        ]
     }
+    ffmpeg_dir = resolve_ffmpeg_location()
+    if ffmpeg_dir:
+        ydl_opts['ffmpeg_location'] = ffmpeg_dir
+        ydl_opts['writethumbnail'] = True
+        ydl_opts['postprocessors'] = [
+            {'key': 'FFmpegMetadata'},
+            {'key': 'EmbedThumbnail'},
+        ]
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
 

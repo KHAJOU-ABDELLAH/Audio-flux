@@ -31,11 +31,13 @@ from .backend import (
 )
 
 
-BG = "#0B0D12"
-PANEL = "#141821"
-PANEL_SOFT = "#1B202B"
-ACCENT = "#B7F36B"
-MUTED = "#9299A8"
+BG = "#0E100F"
+PANEL = "#151816"
+PANEL_SOFT = "#1B1E1C"
+ACCENT = "#C7F36A"
+MUTED = "#858B84"
+TEXT = "#F0F2ED"
+BORDER = "#252A26"
 
 
 def _format_time(seconds):
@@ -65,9 +67,9 @@ def main(page: ft.Page):
     page.title = "Audio Flux"
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = BG
-    page.padding = 20
-    page.window_min_width = 760
-    page.window_min_height = 720
+    page.padding = 0
+    page.window.min_width = 1100
+    page.window.min_height = 700
     page.theme = ft.Theme(color_scheme_seed=ACCENT)
 
     current_source = None
@@ -77,6 +79,7 @@ def main(page: ft.Page):
     last_nonzero_volume = 50
     duration_seconds = 0.0
     current_view = "home"
+    home_feed_mode = "for_you"
     library_section = "all"
     current_search_query = ""
     search_fetch_limit = 24
@@ -84,12 +87,11 @@ def main(page: ft.Page):
     loaded_search_tracks = []
     quick_pick_tracks = []
     search_view_mode = "list"
-    quick_view_mode = "list"
+    quick_view_mode = "grid"
     favorites_view_mode = "list"
     playback_queue = []
     downloaded_tracks = []
     repeat_enabled = False
-    hero_dismissed = False
     settings_file = Path(os.environ.get("APPDATA") or Path.home()) / "AudioFlux" / "settings.json"
     favorites_file = settings_file.parent / "favorites.json"
     history_file = settings_file.parent / "listening_history.json"
@@ -111,7 +113,6 @@ def main(page: ft.Page):
             listening_history = {}
     except (OSError, json.JSONDecodeError):
         listening_history = {}
-    hero_dismissed = bool(listening_history or favorites)
     try:
         playlists = json.loads(playlists_file.read_text(encoding="utf-8"))
         if not isinstance(playlists, list):
@@ -129,36 +130,67 @@ def main(page: ft.Page):
     lyrics_entries = []
     lyric_timestamps = []
     current_lyric_index = -2
+    active_side_panel = "lyrics"
+    playback_generation = 0
+    track_ended = False
+    opened_playlist_id = None
 
-    heading = ft.Text("Find your next favorite.", size=30, weight=ft.FontWeight.W_700, color="#F4F6FA")
-    subtitle = ft.Text("Search YouTube and play it straight from your library.", size=14, color=MUTED)
+    greeting = "Good evening" if datetime.now().hour >= 18 else "Good afternoon" if datetime.now().hour >= 12 else "Good morning"
+    heading = ft.Text(greeting, size=24, weight=ft.FontWeight.W_700, color=TEXT)
+    subtitle = ft.Text("A familiar favorite. A new discovery. Your next listen.", size=11, color=MUTED)
     status = ft.Text("READY · NOTHING PLAYING", size=11, color=ACCENT, weight=ft.FontWeight.W_700)
-    track_title = ft.Text("Nothing playing yet", size=21, weight=ft.FontWeight.W_600, color="#F4F6FA", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+    track_title = ft.Text("Nothing playing yet", size=21, weight=ft.FontWeight.W_600, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
     artist = ft.Text("Search for a track to get started", size=13, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
-    lyrics_status = ft.Text("Lyrics appear here when available.", size=12, color=MUTED)
-    lyrics_list = ft.ListView(spacing=12, padding=ft.Padding.symmetric(horizontal=18, vertical=10), height=330, scroll=ft.ScrollMode.AUTO)
+    lyrics_status = ft.Text("Choose a song to see its lyrics.", size=11, color=MUTED)
+    lyrics_now_title = ft.Text("Nothing playing", size=16, weight=ft.FontWeight.W_700, color=TEXT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+    lyrics_now_artist = ft.Text("Search for a track to get started", size=11, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+    lyrics_credit = ft.Text("Lyric vision provided by lrclib.net", size=9, color=MUTED)
+    synced_badge = ft.Row([
+        ft.Container(width=6, height=6, border_radius=3, bgcolor=ACCENT),
+        ft.Text("Synced lyrics", size=10, color=ACCENT, weight=ft.FontWeight.W_600),
+    ], spacing=6, visible=False)
+    lyrics_list = ft.ListView(spacing=10, padding=ft.Padding.only(top=10, bottom=12), expand=True, scroll=ft.ScrollMode.AUTO)
+    queue_list = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True, visible=False)
+    up_next_list = ft.Column(spacing=8)
+    lyrics_tab_button = ft.TextButton("Lyrics", on_click=lambda e: show_side_panel("lyrics"))
+    queue_tab_button = ft.TextButton("Queue · 0", on_click=lambda e: show_side_panel("queue"))
     lyrics_button = ft.IconButton(
         icon=ft.Icons.LYRICS_ROUNDED, icon_color=MUTED, tooltip="Show synced lyrics",
-        visible=False, on_click=lambda e: toggle_lyrics(),
+        on_click=lambda e: show_side_panel("lyrics"),
     )
+    lyrics_body = ft.Column([
+        lyrics_now_title,
+        lyrics_now_artist,
+        lyrics_credit,
+        synced_badge,
+        lyrics_status,
+        lyrics_list,
+    ], expand=True, spacing=6)
+    up_next_section = ft.Column([
+        ft.Text("UP NEXT", size=10, color=MUTED, weight=ft.FontWeight.W_700),
+        up_next_list,
+    ], spacing=8)
     lyrics_panel = ft.Container(
-        visible=False,
+        visible=True,
         content=ft.Column([
             ft.Row([
-                ft.Column([
-                    ft.Text("LYRICS", size=10, color=ACCENT, weight=ft.FontWeight.W_700),
-                    lyrics_status,
-                ], spacing=3, expand=True),
-                ft.IconButton(icon=ft.Icons.REFRESH_ROUNDED, icon_color=MUTED, tooltip="Retry lyrics lookup", on_click=lambda e: retry_lyrics()),
-                ft.IconButton(icon=ft.Icons.CLOSE_ROUNDED, icon_color=MUTED, tooltip="Hide lyrics", on_click=lambda e: toggle_lyrics()),
+                lyrics_tab_button,
+                queue_tab_button,
+                ft.Container(expand=True),
+                ft.IconButton(icon=ft.Icons.REFRESH_ROUNDED, icon_color=MUTED, icon_size=16, tooltip="Retry lyrics lookup", on_click=lambda e: retry_lyrics()),
+                ft.IconButton(icon=ft.Icons.CLOSE_ROUNDED, icon_color=MUTED, icon_size=16, tooltip="Hide panel", on_click=lambda e: hide_side_panel()),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            lyrics_list,
-        ], spacing=8),
-        padding=16, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
-        width=340,
+            lyrics_body,
+            queue_list,
+            up_next_section,
+        ], expand=True, spacing=8),
+        padding=ft.Padding.only(left=16, right=16, top=14, bottom=12),
+        bgcolor=PANEL,
+        width=292,
+        border=ft.Border.only(left=ft.BorderSide(1, BORDER)),
     )
     cover = ft.Container(
-        width=220, height=220, border_radius=18, bgcolor="#242B37",
+        width=220, height=220, border_radius=12, bgcolor="#242B37",
         alignment=ft.Alignment.CENTER,
         content=ft.Column(
             [ft.Icon(ft.Icons.GRAPHIC_EQ, size=62, color=ACCENT), ft.Text("AUDIO FLUX", size=10, color=MUTED, weight=ft.FontWeight.W_700)],
@@ -167,9 +199,11 @@ def main(page: ft.Page):
     )
 
     search_input = ft.TextField(
-        label=None, hint_text="Search songs, artists, albums  ·  Ctrl + K",
-        prefix_icon=ft.Icons.SEARCH, expand=True, border_radius=12, filled=True, bgcolor=PANEL_SOFT,
-        border_color="#2A303C", focused_border_color=ACCENT, on_submit=lambda e: start_search(),
+        label=None, hint_text="Search songs, artists, or paste a YouTube link · Ctrl + K",
+        prefix_icon=ft.Icons.SEARCH, expand=True, border_radius=6, filled=True, bgcolor=PANEL_SOFT,
+        border_color=ft.Colors.TRANSPARENT, focused_border_color=ft.Colors.TRANSPARENT,
+        height=34, text_size=11, hint_style=ft.TextStyle(size=11, color=MUTED),
+        content_padding=ft.Padding.symmetric(vertical=0), on_submit=lambda e: start_search(),
     )
     download_folder = ft.TextField(
         label="Download folder", hint_text="Leave blank to use the app's current folder",
@@ -200,15 +234,16 @@ def main(page: ft.Page):
     volume_slider = ft.Slider(min=0, max=100, value=50, active_color=ACCENT, inactive_color="#343B47", width=126, on_change=lambda e: on_volume_change(e))
     compact_seek_slider = ft.Slider(
         min=0, max=100, value=0, active_color=ACCENT, inactive_color="#343B47",
-        thumb_color=ACCENT, height=20, on_change_end=lambda e: adjust_current_time(float(e.control.value)),
+        thumb_color=ACCENT, height=20, on_change_end=lambda e: on_seek(e),
     )
+    compact_elapsed = ft.Text("0:00", size=9, color=MUTED, width=32)
+    compact_total = ft.Text("0:00", size=9, color=MUTED, width=32, text_align=ft.TextAlign.RIGHT)
     compact_cover = ft.Container(width=44, height=44, bgcolor="#242B37", border_radius=8, alignment=ft.Alignment.CENTER, content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=ACCENT, size=22))
     compact_title = ft.Text("Nothing playing", size=12, weight=ft.FontWeight.W_600, color="#F4F6FA", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
     compact_artist = ft.Text("Choose a track to begin", size=10, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
     compact_play_button = ft.IconButton(icon=ft.Icons.PLAY_ARROW_ROUNDED, icon_color=BG, bgcolor=ACCENT, tooltip="Play / pause", on_click=lambda e: toggle_pause(e))
     compact_favorite_button = ft.IconButton(icon=ft.Icons.FAVORITE_BORDER_ROUNDED, icon_color=MUTED, tooltip="Add to favorites", on_click=lambda e: toggle_favorite(selected_track) if selected_track else None)
     volume_mute_button = ft.IconButton(icon=ft.Icons.VOLUME_UP_ROUNDED, icon_color=MUTED, tooltip="Mute", on_click=lambda e: toggle_mute(e))
-    queue_list = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, height=380)
     speed_options = ft.SegmentedButton(
         segments=[
             ft.Segment(value="1", label="1×"),
@@ -228,6 +263,8 @@ def main(page: ft.Page):
         icon=ft.Icons.REPEAT_ROUNDED, icon_color=MUTED, tooltip="Repeat off",
         on_click=lambda e: toggle_repeat(),
     )
+    compact_repeat_button = ft.IconButton(icon=ft.Icons.REPEAT_ROUNDED, icon_color=MUTED, tooltip="Repeat off", on_click=lambda e: toggle_repeat())
+    compact_shuffle_button = ft.IconButton(icon=ft.Icons.SHUFFLE_ROUNDED, icon_color=MUTED, tooltip="Shuffle play", on_click=lambda e: shuffle_play())
     play_button = ft.IconButton(icon=ft.Icons.PLAY_ARROW_ROUNDED, icon_size=34, icon_color=BG, bgcolor=ACCENT, tooltip="Play / pause", on_click=lambda e: toggle_pause(e))
     pause_label = ft.Text("PLAY", size=10, color=MUTED, weight=ft.FontWeight.W_700)
     search_progress = ft.ProgressRing(width=18, height=18, stroke_width=2, color=ACCENT, visible=False)
@@ -253,7 +290,7 @@ def main(page: ft.Page):
             results_list,
             ft.Row([load_more_button], alignment=ft.MainAxisAlignment.CENTER),
         ], spacing=12),
-        padding=18, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
+        padding=ft.Padding.only(top=4, bottom=8),
     )
 
     def set_status(message, color=ACCENT):
@@ -261,12 +298,35 @@ def main(page: ft.Page):
         status.color = color
         page.update()
 
-    def toggle_lyrics():
-        if not lyrics_button.visible:
-            return
-        lyrics_panel.visible = not lyrics_panel.visible
-        lyrics_button.icon_color = ACCENT if lyrics_panel.visible else MUTED
+    def show_side_panel(name):
+        nonlocal active_side_panel, player_expanded
+        if player_expanded:
+            player_expanded = False
+            player_card.visible = False
+            compact_player.visible = True
+            content_region.visible = True
+        active_side_panel = name
+        lyrics_panel.visible = True
+        lyrics_body.visible = name == "lyrics"
+        queue_list.visible = name == "queue"
+        up_next_section.visible = name == "lyrics"
+        lyrics_tab_button.style = ft.ButtonStyle(color=ACCENT if name == "lyrics" else MUTED)
+        queue_tab_button.style = ft.ButtonStyle(color=ACCENT if name == "queue" else MUTED)
+        lyrics_button.icon_color = ACCENT if name == "lyrics" else MUTED
+        if name == "queue":
+            refresh_queue()
         page.update()
+
+    def hide_side_panel():
+        lyrics_panel.visible = False
+        lyrics_button.icon_color = MUTED
+        page.update()
+
+    def toggle_lyrics():
+        if lyrics_panel.visible and active_side_panel == "lyrics":
+            hide_side_panel()
+        else:
+            show_side_panel("lyrics")
 
     def scroll_to_lyric(index):
         async def scroll():
@@ -282,15 +342,13 @@ def main(page: ft.Page):
             controls.append(ft.Container(
                 content=ft.Text(
                     text,
-                    size=18 if index == current_lyric_index else 15,
-                    color=ACCENT if index == current_lyric_index else "#89919F",
-                    weight=ft.FontWeight.W_600 if index == current_lyric_index else ft.FontWeight.W_400,
-                    text_align=ft.TextAlign.CENTER,
+                    size=20 if index == current_lyric_index else 14,
+                    color=ACCENT if index == current_lyric_index else "#7E847C",
+                    weight=ft.FontWeight.W_700 if index == current_lyric_index else ft.FontWeight.W_400,
                 ),
                 key=f"lyric-{index}",
                 on_click=(lambda e, position=timestamp: adjust_current_time(position)) if timestamp is not None else None,
-                alignment=ft.Alignment.CENTER,
-                padding=6,
+                padding=ft.Padding.symmetric(vertical=4),
             ))
         lyrics_list.controls = controls
 
@@ -304,9 +362,9 @@ def main(page: ft.Page):
         current_lyric_index = index
         for line_index, control in enumerate(lyrics_list.controls):
             text_control = control.content
-            text_control.size = 18 if line_index == index else 15
-            text_control.color = ACCENT if line_index == index else "#89919F"
-            text_control.weight = ft.FontWeight.W_600 if line_index == index else ft.FontWeight.W_400
+            text_control.size = 20 if line_index == index else 14
+            text_control.color = ACCENT if line_index == index else "#7E847C"
+            text_control.weight = ft.FontWeight.W_700 if line_index == index else ft.FontWeight.W_400
         if index >= 0:
             scroll_to_lyric(index)
 
@@ -319,15 +377,18 @@ def main(page: ft.Page):
             if record and record.get("syncedLyrics"):
                 lyrics_entries = _parse_lrc(record["syncedLyrics"])
                 lyric_timestamps = [entry[0] for entry in lyrics_entries]
-                lyrics_status.value = "Synced lyrics · tap a line to seek"
+                lyrics_status.value = "Tap a line to seek"
+                synced_badge.visible = True
             elif record and record.get("plainLyrics"):
                 lyrics_entries = [(None, line.strip()) for line in record["plainLyrics"].splitlines() if line.strip()]
                 lyric_timestamps = []
                 lyrics_status.value = "Lyrics found · timing unavailable"
+                synced_badge.visible = False
             else:
                 lyrics_entries = []
                 lyric_timestamps = []
                 lyrics_status.value = "Synced lyrics aren’t available for this track yet."
+                synced_badge.visible = False
             current_lyric_index = -2
             render_lyrics()
         except Exception as exc:
@@ -335,6 +396,7 @@ def main(page: ft.Page):
                 return
             lyrics_entries = []
             lyric_timestamps = []
+            synced_badge.visible = False
             error = str(exc).lower()
             if 'temporarily unavailable' in error or 'http 5' in error:
                 lyrics_status.value = 'Lyrics service is temporarily unavailable. Tap refresh to try again.'
@@ -356,9 +418,9 @@ def main(page: ft.Page):
         lyrics_entries = []
         lyric_timestamps = []
         current_lyric_index = -2
-        lyrics_panel.visible = False
-        lyrics_button.visible = True
-        lyrics_button.icon_color = MUTED
+        lyrics_panel.visible = True
+        lyrics_button.icon_color = ACCENT
+        synced_badge.visible = False
         lyrics_status.value = "Looking for synced lyrics…"
         lyrics_list.controls = [ft.Text(lyrics_status.value, size=13, color=MUTED, text_align=ft.TextAlign.CENTER)]
         page.run_thread(
@@ -399,25 +461,32 @@ def main(page: ft.Page):
         save_listening_history()
 
     def update_track(track_info, track):
-        nonlocal current_source, duration_seconds, is_paused, selected_track, current_lyrics_artist
+        nonlocal current_source, duration_seconds, is_paused, selected_track, current_lyrics_artist, playback_generation, track_ended
         if not track_info or not track_info.get("audio_source"):
             set_status("Could not load this audio", "#FF8A80")
             return
+        playback_generation += 1
+        track_ended = False
         current_source = track_info["audio_source"]
         selected_track = track
         record_track_started(track)
         refresh_home_sections()
         duration_seconds = 0.0
         is_paused = False
-        landing_panel.visible = False
+        compact_seek_slider.max = 100
+        compact_seek_slider.value = 0
+        compact_elapsed.value = "0:00"
+        compact_total.value = "0:00"
         player_card.visible = player_expanded
-        compact_player.visible = True
+        compact_player.visible = not player_expanded
         track_title.value = track.get("title") or "Audio stream"
         compact_title.value = track.get("title") or "Audio stream"
         artist_name = track_info.get("artist") or track.get("artist") or "Unknown artist"
         current_lyrics_artist = artist_name
         artist.value = f"By {artist_name}"
         compact_artist.value = artist_name
+        lyrics_now_title.value = track.get("title") or "Audio stream"
+        lyrics_now_artist.value = artist_name
         compact_favorite_button.icon = ft.Icons.FAVORITE_ROUNDED if is_favorite(track) else ft.Icons.FAVORITE_BORDER_ROUNDED
         compact_favorite_button.icon_color = "#F0788A" if is_favorite(track) else MUTED
         load_lyrics(track, artist_name)
@@ -440,10 +509,11 @@ def main(page: ft.Page):
         pause_label.value = "PAUSE"
         page.update()
         play_audio(current_source)
+        refresh_queue()
         resume_position = float(track.get("_resume_position") or 0)
         if resume_position > 5:
             page.run_task(seek_after_start, resume_position)
-        page.run_task(poll_playback)
+        page.run_task(poll_playback, playback_generation)
 
     async def seek_after_start(position):
         await asyncio.sleep(1)
@@ -519,6 +589,7 @@ def main(page: ft.Page):
         player_card.visible = player_expanded
         compact_player.visible = not player_expanded
         content_region.visible = not player_expanded
+        lyrics_panel.visible = not player_expanded
         player_card.expand = player_expanded
         page.update()
 
@@ -526,6 +597,7 @@ def main(page: ft.Page):
         nonlocal last_nonzero_volume
         value = max(0, min(100, int(value)))
         volume_slider.value = value
+        volume_value.value = f"{value}%"
         try:
             from .backend import player
             player.volume = value
@@ -544,21 +616,58 @@ def main(page: ft.Page):
         else:
             set_volume(last_nonzero_volume or 50)
 
+    def upcoming_track():
+        if playback_queue:
+            return playback_queue[0]
+        candidates = candidate_tracks()
+        if not candidates:
+            return None
+        current_key = track_key(selected_track or {})
+        start_index = next((i for i, item in enumerate(candidates) if track_key(item) == current_key), -1)
+        if not candidates:
+            return None
+        return candidates[(start_index + 1) % len(candidates)] if current_source else candidates[0]
+
+    def up_next_row(track):
+        thumb = track_artwork(track, 42, 8)
+        duration = _format_time(track.get("duration")) if track.get("duration") else ""
+        return ft.Container(
+            content=ft.Row([
+                thumb,
+                ft.Column([
+                    ft.Text(track.get("title") or "Untitled", size=12, color=TEXT, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(track.get("artist") or "Unknown artist", size=10, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ], spacing=2, expand=True),
+                ft.Text(duration, size=10, color=MUTED),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            on_click=lambda e, item=track: play_track(item),
+            padding=ft.Padding.symmetric(vertical=4),
+        )
+
     def refresh_queue():
+        queue_tab_button.text = f"Queue · {len(playback_queue)}"
         if not playback_queue:
             queue_list.controls = [ft.Text("Your queue is empty. Add tracks from a menu.", size=12, color=MUTED)]
         else:
             queue_list.controls = [
                 ft.Container(
                     content=ft.Row([
+                        track_artwork(item, 36, 7),
                         ft.Column([
-                            ft.Text(item.get("title") or "Untitled", size=13, color="#F4F6FA", max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(item.get("title") or "Untitled", size=13, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                             ft.Text(item.get("artist") or "Unknown artist", size=10, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ], spacing=3, expand=True),
                         ft.IconButton(icon=ft.Icons.CLOSE_ROUNDED, icon_color=MUTED, tooltip="Remove from queue", on_click=lambda e, target=item: remove_from_queue(target)),
-                    ]), padding=8, bgcolor=PANEL_SOFT, border_radius=10,
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER), padding=8, bgcolor=PANEL_SOFT, border_radius=10,
                 ) for item in playback_queue
             ]
+        nxt = upcoming_track()
+        if nxt and track_key(nxt) != track_key(selected_track or {}):
+            up_next_list.controls = [up_next_row(nxt)]
+        elif nxt:
+            up_next_list.controls = [up_next_row(nxt)]
+        else:
+            up_next_list.controls = [ft.Text("Play a track and the next one will land here.", size=11, color=MUTED)]
 
     def remove_from_queue(track):
         identity = track_key(track)
@@ -569,8 +678,7 @@ def main(page: ft.Page):
             page.update()
 
     def open_queue(e=None):
-        refresh_queue()
-        page.show_dialog(queue_dialog)
+        show_side_panel("queue")
 
     def shuffle_play():
         if playback_queue:
@@ -583,7 +691,7 @@ def main(page: ft.Page):
             candidates = all_library_tracks()
         else:
             candidates = loaded_search_tracks or quick_pick_tracks
-        if current_source and len(candidates) > 1:
+        if current_source and selected_track and len(candidates) > 1:
             candidates = [track for track in candidates if track.get("url") != selected_track.get("url")]
         if not candidates:
             set_status("Load some tracks first, then shuffle play", "#FFCC80")
@@ -596,6 +704,8 @@ def main(page: ft.Page):
         set_repeat_mode(repeat_enabled)
         repeat_button.icon_color = ACCENT if repeat_enabled else MUTED
         repeat_button.tooltip = "Repeat on" if repeat_enabled else "Repeat off"
+        compact_repeat_button.icon_color = ACCENT if repeat_enabled else MUTED
+        compact_repeat_button.tooltip = "Repeat on" if repeat_enabled else "Repeat off"
         page.update()
 
     def track_key(track):
@@ -766,6 +876,7 @@ def main(page: ft.Page):
         playlists.append({"id": f"playlist-{random.getrandbits(64):016x}", "name": name, "tracks": []})
         if save_playlists():
             page.pop_dialog()
+            refresh_sidebar_playlists()
             set_status(f"Created playlist · {name}", ACCENT)
             if current_view == "library":
                 set_library_section("playlists")
@@ -801,32 +912,20 @@ def main(page: ft.Page):
             if current_view == "library":
                 refresh_library()
 
-    def result_tile(track, grid=False, delete_context=None):
-        size = 158 if grid else 54
-        artwork = ft.Image(
-            src=track.get("thumbnail") or "",
-            width=size,
-            height=size,
-            fit=ft.BoxFit.COVER,
-            border_radius=11 if grid else 8,
-        ) if track.get("thumbnail") else ft.Container(
-            width=size, height=size, border_radius=11 if grid else 8, bgcolor="#242B37",
+    def track_artwork(track, size, radius=8):
+        src = track.get("thumbnail") if track else None
+        if src and src != "placeholder.png":
+            return ft.Container(
+                content=ft.Image(src=src, width=size, height=size, fit=ft.BoxFit.COVER, border_radius=radius),
+                width=size, height=size, border_radius=radius, clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            )
+        return ft.Container(
+            width=size, height=size, border_radius=radius, bgcolor="#242B37",
             alignment=ft.Alignment.CENTER,
-            content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=ACCENT, size=30 if grid else 24),
+            content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=ACCENT, size=max(16, size // 3)),
         )
-        duration = _format_time(track.get("duration")) if track.get("duration") else "—"
-        display_title = track.get("_display_title") or track.get("title") or "Untitled"
-        display_artist = track.get("_display_artist") or track.get("artist") or "Unknown artist"
-        favorite_button = ft.IconButton(
-            icon=ft.Icons.FAVORITE_ROUNDED if is_favorite(track) else ft.Icons.FAVORITE_BORDER_ROUNDED,
-            icon_color="#F0788A" if is_favorite(track) else MUTED,
-            tooltip="Remove favorite" if is_favorite(track) else "Add to favorites",
-            on_click=lambda e, item=track: toggle_favorite(item, e),
-        )
-        play_action = ft.IconButton(
-            icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=ACCENT, tooltip="Play", on_click=lambda e, item=track: play_track(item),
-        )
+
+    def track_menu_items(track, delete_context=None):
         menu_items = [
             ft.PopupMenuItem(content="Add to queue", icon=ft.Icons.QUEUE_MUSIC_ROUNDED, on_click=lambda e, item=track: add_to_queue(item)),
             ft.PopupMenuItem(content="Add to playlist", icon=ft.Icons.PLAYLIST_ADD_ROUNDED, on_click=lambda e, item=track: show_add_to_playlist(item)),
@@ -838,53 +937,103 @@ def main(page: ft.Page):
                 content="Delete from this section", icon=ft.Icons.DELETE_OUTLINE,
                 on_click=lambda e, item=track, section=delete_context: request_delete_track(item, section),
             ))
-        actions = ft.Row([
-            favorite_button,
-            ft.PopupMenuButton(icon=ft.Icons.MORE_VERT_ROUNDED, icon_color=MUTED, tooltip="More track actions", items=menu_items),
-        ], spacing=0)
+        return menu_items
+
+    def result_tile(track, grid=False, delete_context=None):
+        duration = _format_time(track.get("duration")) if track.get("duration") else "—"
+        display_title = track.get("_display_title") or track.get("title") or "Untitled"
+        display_artist = track.get("_display_artist") or track.get("artist") or "Unknown artist"
+        favorite_button = ft.IconButton(
+            icon=ft.Icons.FAVORITE_ROUNDED if is_favorite(track) else ft.Icons.FAVORITE_BORDER_ROUNDED,
+            icon_color="#F0788A" if is_favorite(track) else MUTED,
+            tooltip="Remove favorite" if is_favorite(track) else "Add to favorites",
+            icon_size=18,
+            on_click=lambda e, item=track: toggle_favorite(item, e),
+        )
+        menu = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT_ROUNDED, icon_color=MUTED, tooltip="More track actions", items=track_menu_items(track, delete_context))
         if grid:
-            resume_seconds = float(track.get("_resume_position") or 0)
-            secondary_text = f"Resume at {_format_time(resume_seconds)}" if resume_seconds > 3 else display_artist
+            cover_size = 158
+            play_badge = ft.Container(
+                content=ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, color=BG, size=22),
+                width=34, height=34, border_radius=17, bgcolor=ACCENT,
+                bottom=8, right=8, on_click=lambda e, item=track: play_track(item),
+            )
+            duration_badge = ft.Container(
+                content=ft.Text(duration, size=9, color=TEXT, weight=ft.FontWeight.W_600),
+                bgcolor="#111814CC", padding=ft.Padding.symmetric(horizontal=6, vertical=3),
+                border_radius=6, top=8, right=8,
+            )
+            cover = ft.Stack(
+                controls=[
+                    track_artwork(track, cover_size, 10),
+                    duration_badge,
+                    play_badge,
+                ],
+                width=cover_size,
+                height=cover_size,
+            )
             content = ft.Column([
-                artwork,
-                ft.Text(display_title, size=13, color="#F4F6FA", weight=ft.FontWeight.W_600, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                ft.Text(secondary_text, size=11, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                ft.Row([ft.Text(duration, size=10, color=MUTED, expand=True), play_action], spacing=2),
-                actions,
-            ], spacing=7)
+                cover,
+                ft.Text(display_title, size=12, color=TEXT, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(display_artist, size=10, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Row([favorite_button, menu], spacing=0),
+            ], spacing=6)
+            tile = ft.Container(content=content, width=cover_size, padding=0, bgcolor=ft.Colors.TRANSPARENT, animate=180, tooltip=str(track.get("title") or ""))
         else:
             resume_seconds = float(track.get("_resume_position") or 0)
             secondary_text = f"{display_artist}  ·  Resume at {_format_time(resume_seconds)}" if resume_seconds > 3 else display_artist
             content = ft.Row([
-                artwork,
+                track_artwork(track, 48, 8),
                 ft.Column([
-                    ft.Text(display_title, size=13, weight=ft.FontWeight.W_600, color="#F4F6FA", max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(display_title, size=13, weight=ft.FontWeight.W_600, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                     ft.Text(secondary_text, size=11, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                ], spacing=4, expand=True),
+                ], spacing=3, expand=True),
                 ft.Text(duration, size=11, color=MUTED, width=42, text_align=ft.TextAlign.RIGHT),
-                play_action,
-                actions,
+                ft.IconButton(icon=ft.Icons.PLAY_ARROW_ROUNDED, icon_color=ACCENT, tooltip="Play", on_click=lambda e, item=track: play_track(item)),
+                favorite_button,
+                menu,
             ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-
-        tile = ft.Container(
-            content=content,
-        width=190 if grid else None,
-            padding=12 if grid else 8,
-            bgcolor=PANEL_SOFT,
-            border_radius=14 if grid else 12,
-            border=ft.Border.all(1, "#252B36"),
-            animate=180,
-            tooltip=str(track.get("title") or ""),
-        )
+            tile = ft.Container(
+                content=content, padding=8, bgcolor=PANEL_SOFT, border_radius=12,
+                animate=180, tooltip=str(track.get("title") or ""),
+            )
 
         def handle_hover(e):
             hovered = str(e.data).lower() == "true"
-            tile.bgcolor = "#202832" if hovered else PANEL_SOFT
-            tile.border = ft.Border.all(1, "#3D5441" if hovered else "#252B36")
+            if not grid:
+                tile.bgcolor = "#222824" if hovered else PANEL_SOFT
             page.update()
 
         tile.on_hover = handle_hover
+        if grid:
+            tile.on_click = lambda e, item=track: play_track(item)
         return tile
+
+    def continue_card(track):
+        resume_seconds = float(track.get("_resume_position") or 0)
+        duration_value = float(track.get("duration") or 0)
+        progress = min(1.0, resume_seconds / duration_value) if duration_value else (0.35 if resume_seconds else 0)
+        card = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    track_artwork(track, 58, 10),
+                    ft.Column([
+                        ft.Text(track.get("title") or "Untitled", size=13, color=TEXT, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(track.get("artist") or "Unknown artist", size=11, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ], spacing=3, expand=True),
+                    ft.IconButton(
+                        icon=ft.Icons.PLAY_ARROW_ROUNDED, icon_color=BG, bgcolor=ACCENT,
+                        icon_size=18, width=34, height=34, tooltip="Resume",
+                        on_click=lambda e, item=track: play_track(item),
+                    ),
+                    ft.PopupMenuButton(icon=ft.Icons.MORE_VERT_ROUNDED, icon_color=MUTED, items=track_menu_items(track)),
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.ProgressBar(value=progress, color=ACCENT, bgcolor="#2A312C", bar_height=3, border_radius=4),
+            ], spacing=10),
+            padding=12, bgcolor=PANEL_SOFT, border_radius=14, expand=True,
+            on_click=lambda e, item=track: play_track(item),
+        )
+        return card
 
     def render_track_collection(tracks, mode="list", delete_context=None):
         tiles = [result_tile(track, grid=(mode == "grid"), delete_context=delete_context) for track in tracks]
@@ -954,7 +1103,7 @@ def main(page: ft.Page):
         page.run_thread(search_worker, current_search_query, next_limit, True, search_generation)
 
     def start_search(e=None):
-        nonlocal current_search_query, search_fetch_limit, search_generation, loaded_search_tracks
+        nonlocal current_view, current_search_query, search_fetch_limit, search_generation, loaded_search_tracks, player_expanded
         query = (search_input.value or "").strip()
         if not query:
             set_status("Type a song, artist, or album to search", "#FFCC80")
@@ -964,6 +1113,12 @@ def main(page: ft.Page):
         continue_panel.visible = False
         forgotten_panel.visible = False
         results_panel.visible = True
+        player_expanded = False
+        player_card.visible = False
+        content_region.visible = True
+        compact_player.visible = not player_expanded
+        current_view = "search"
+        main_content.content = home_view
         current_search_query = query
         search_fetch_limit = 24
         loaded_search_tracks = []
@@ -974,6 +1129,7 @@ def main(page: ft.Page):
         results_summary.value = f"Searching YouTube for “{query}”…"
         results_list.content = ft.Row([ft.ProgressRing(width=18, height=18, color=ACCENT), ft.Text("Finding tracks…", size=12, color=MUTED)], spacing=10)
         search_progress.visible = True
+        update_navigation()
         page.update()
         page.run_thread(search_worker, query, search_fetch_limit, False, request_id)
 
@@ -1002,11 +1158,15 @@ def main(page: ft.Page):
         page.update()
 
     async def return_to_discovery():
-        nonlocal player_expanded
+        nonlocal player_expanded, current_view, current_search_query
         # Let the stop-button event finish before removing its parent control.
         await asyncio.sleep(0.08)
         if current_source is not None:
             return
+        if current_view == "search":
+            current_view = "home"
+            current_search_query = ""
+            search_input.value = ""
         play_button.icon = ft.Icons.PLAY_ARROW_ROUNDED
         pause_label.value = "PLAY"
         track_title.value = "Nothing playing yet"
@@ -1014,31 +1174,34 @@ def main(page: ft.Page):
         compact_play_button.icon = ft.Icons.PLAY_ARROW_ROUNDED
         compact_title.value = "Nothing playing"
         compact_artist.value = "Choose a track to begin"
+        lyrics_now_title.value = "Nothing playing"
+        lyrics_now_artist.value = "Search for a track to get started"
         player_card.visible = False
-        compact_player.visible = False
+        compact_player.visible = True
         player_expanded = False
         content_region.visible = True
-        lyrics_panel.visible = False
-        lyrics_button.visible = False
+        lyrics_panel.visible = True
+        synced_badge.visible = False
         quick_picks_panel.visible = True
-        landing_panel.visible = not hero_dismissed
+        landing_panel.visible = True
         results_panel.visible = False
         seek_slider.value = 0
         compact_seek_slider.value = 0
+        compact_elapsed.value = "0:00"
+        compact_total.value = "0:00"
         elapsed.value = "0:00"
         total.value = "0:00"
         status.value = "STOPPED · READY WHEN YOU ARE"
         status.color = MUTED
         refresh_home_sections()
+        update_navigation()
         page.update()
-        if landing_panel.visible:
-            page.run_task(animate_waveform)
 
     def stop_playback(e=None):
-        nonlocal current_source, selected_track, is_paused, lyrics_generation, player_expanded
+        nonlocal current_source, selected_track, is_paused, lyrics_generation, player_expanded, playback_generation
+        playback_generation += 1
         lyrics_generation += 1
-        lyrics_panel.visible = False
-        lyrics_button.visible = False
+        lyrics_panel.visible = True
         if current_history_key:
             position = current_time()
             if position is not None and current_history_key in listening_history:
@@ -1120,9 +1283,9 @@ def main(page: ft.Page):
         download_folder.value = download_directory
         page.show_dialog(settings_dialog)
 
-    async def poll_playback():
-        nonlocal duration_seconds, last_poll_position, last_history_save
-        while current_source is not None:
+    async def poll_playback(generation):
+        nonlocal duration_seconds, last_poll_position, last_history_save, track_ended
+        while current_source is not None and generation == playback_generation:
             position = current_time()
             duration = get_audio_duration()
             if duration and duration > 0:
@@ -1130,11 +1293,13 @@ def main(page: ft.Page):
                 seek_slider.max = duration_seconds
                 compact_seek_slider.max = duration_seconds
                 total.value = _format_time(duration_seconds)
+                compact_total.value = _format_time(duration_seconds)
             if position is not None:
                 position = max(0.0, float(position))
                 seek_slider.value = min(position, duration_seconds) if duration_seconds else 0
                 compact_seek_slider.value = min(position, duration_seconds) if duration_seconds else 0
                 elapsed.value = _format_time(position)
+                compact_elapsed.value = _format_time(position)
                 update_lyrics(position)
                 if current_history_key and not is_paused:
                     previous = last_poll_position
@@ -1143,10 +1308,12 @@ def main(page: ft.Page):
                         item = listening_history.get(current_history_key)
                         if item is not None:
                             item["played_seconds"] = float(item.get("played_seconds", 0)) + listened
-                    if duration_seconds and position >= duration_seconds - 2:
-                        listening_history[current_history_key]["resume_position"] = 0
-                    else:
-                        listening_history[current_history_key]["resume_position"] = position
+                    history_item = listening_history.get(current_history_key)
+                    if history_item is not None:
+                        if duration_seconds and position >= duration_seconds - 2:
+                            history_item["resume_position"] = 0
+                        else:
+                            history_item["resume_position"] = position
                     last_poll_position = position
                     now = asyncio.get_running_loop().time()
                     if now - last_history_save >= 5:
@@ -1155,6 +1322,16 @@ def main(page: ft.Page):
                         refresh_home_sections()
                         if current_view == "library" and library_section == "top50":
                             refresh_library()
+                if (
+                    duration_seconds
+                    and not is_paused
+                    and not repeat_enabled
+                    and position >= max(0.0, duration_seconds - 0.8)
+                    and not track_ended
+                ):
+                    track_ended = True
+                    next_track()
+                    return
             volume = get_current_volume()
             if volume is not None:
                 volume_slider.value = volume
@@ -1205,16 +1382,6 @@ def main(page: ft.Page):
             ft.Button("Create playlist", icon=ft.Icons.ADD_ROUNDED, on_click=create_playlist, style=ft.ButtonStyle(bgcolor=ACCENT, color=BG, shape=ft.RoundedRectangleBorder(radius=9))),
         ], actions_alignment=ft.MainAxisAlignment.END,
     )
-    queue_dialog = ft.AlertDialog(
-        modal=True, bgcolor=PANEL, shape=ft.RoundedRectangleBorder(radius=18),
-        title=ft.Row([
-            ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=ACCENT),
-            ft.Text("Up next", size=20, color="#F4F6FA", weight=ft.FontWeight.W_600),
-        ], spacing=10),
-        content=queue_list,
-        actions=[ft.TextButton("Done", on_click=lambda e: page.pop_dialog())],
-        actions_alignment=ft.MainAxisAlignment.END,
-    )
     add_to_playlist_dialog = ft.AlertDialog(
         modal=True, bgcolor=PANEL, shape=ft.RoundedRectangleBorder(radius=18),
         title=ft.Text("Add to playlist", size=20, weight=ft.FontWeight.W_600, color="#F4F6FA"),
@@ -1246,44 +1413,133 @@ def main(page: ft.Page):
         ], actions_alignment=ft.MainAxisAlignment.END,
     )
 
-    home_nav = ft.TextButton(
-        "Home", icon=ft.Icons.HOME_ROUNDED, on_click=lambda e: switch_view("home"),
+    library_nav_count = ft.Text("0", size=10, color=MUTED, width=28, text_align=ft.TextAlign.RIGHT)
+    favorites_nav_count = ft.Text("0", size=10, color=MUTED, width=28, text_align=ft.TextAlign.RIGHT)
+    downloads_nav_count = ft.Text("0", size=10, color=MUTED, width=28, text_align=ft.TextAlign.RIGHT)
+    nav_refs = {}
+
+    def make_nav_item(key, icon, label, on_click, count_control=None):
+        icon_ctrl = ft.Icon(icon, size=16, color=MUTED)
+        label_ctrl = ft.Text(label, size=12, color=MUTED, expand=True, weight=ft.FontWeight.W_500)
+        row = [icon_ctrl, label_ctrl]
+        if count_control is not None:
+            row.append(count_control)
+        box = ft.Container(
+            content=ft.Row(row, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            border_radius=8,
+            on_click=on_click,
+            ink=True,
+        )
+        nav_refs[key] = (box, icon_ctrl, label_ctrl, count_control)
+        return box
+
+    def style_nav_item(key, active):
+        box, icon_ctrl, label_ctrl, count_control = nav_refs[key]
+        box.bgcolor = "#24301C" if active else ft.Colors.TRANSPARENT
+        icon_ctrl.color = ACCENT if active else MUTED
+        label_ctrl.color = TEXT if active else MUTED
+        label_ctrl.weight = ft.FontWeight.W_600 if active else ft.FontWeight.W_500
+        if count_control is not None:
+            count_control.color = TEXT if active else MUTED
+
+    home_nav = make_nav_item("home", ft.Icons.HOME_ROUNDED, "Home", lambda e: switch_view("home"))
+    search_nav = make_nav_item("search", ft.Icons.SEARCH_ROUNDED, "Search", lambda e: (switch_view("search"), search_input.focus()))
+    library_nav = make_nav_item("library", ft.Icons.LIBRARY_MUSIC_ROUNDED, "Library", lambda e: switch_view("library"), library_nav_count)
+    favorites_nav = make_nav_item("favorites", ft.Icons.FAVORITE_BORDER_ROUNDED, "Favorites", lambda e: switch_view("library", "favorites"), favorites_nav_count)
+    downloads_nav = make_nav_item("downloads", ft.Icons.DOWNLOAD_OUTLINED, "Downloads", lambda e: switch_view("library", "downloads"), downloads_nav_count)
+    playlists_nav = make_nav_item("playlists", ft.Icons.QUEUE_MUSIC_ROUNDED, "Playlists", lambda e: switch_view("library", "playlists"))
+    settings_nav = make_nav_item("settings", ft.Icons.SETTINGS_OUTLINED, "Settings", open_settings)
+    sidebar_playlist_list = ft.Column(spacing=2)
+
+    def playlist_sidebar_item(playlist):
+        count = len(playlist.get("tracks") or [])
+        return ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=15, color=MUTED),
+                ft.Column([
+                    ft.Text(playlist.get("name", "Playlist"), size=11, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(f"{count} tracks", size=9, color=MUTED),
+                ], spacing=1, expand=True),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            border_radius=8,
+            on_click=lambda e, pid=playlist.get("id"): switch_view("library", "playlists", playlist_id=pid),
+            ink=True,
+            tooltip=playlist.get("name", "Playlist"),
+        )
+
+    def refresh_sidebar_playlists():
+        items = [playlist_sidebar_item(playlist) for playlist in playlists[:4]]
+        if not items:
+            items = [ft.Text("Create your first playlist", size=10, color=MUTED)]
+        sidebar_playlist_list.controls = items
+
+    playlist_heading = ft.Row([
+        ft.Text("YOUR PLAYLISTS", size=9, color=MUTED, weight=ft.FontWeight.W_700, expand=True),
+        ft.IconButton(icon=ft.Icons.ADD_ROUNDED, icon_color=MUTED, icon_size=15, tooltip="Create playlist", on_click=show_create_playlist),
+    ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    refresh_sidebar_playlists()
+    sidebar = ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    content=ft.Icon(ft.Icons.GRAPHIC_EQ, size=16, color=ACCENT),
+                    width=28, height=28, border_radius=8, bgcolor="#1C2418",
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Text("Audio Flux", size=14, color=TEXT, weight=ft.FontWeight.W_700),
+            ], spacing=9),
+            ft.Container(height=10),
+            home_nav,
+            search_nav,
+            library_nav,
+            favorites_nav,
+            downloads_nav,
+            playlists_nav,
+            ft.Container(height=8),
+            playlist_heading,
+            sidebar_playlist_list,
+            ft.Container(expand=True),
+            settings_nav,
+            ft.Row([ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, size=13, color=MUTED), ft.Text("Music from YouTube", size=9, color=MUTED)], spacing=7),
+        ], spacing=2, expand=True),
+        width=208, padding=ft.Padding.symmetric(horizontal=12, vertical=16),
+        bgcolor=BG, border=ft.Border.only(right=ft.BorderSide(1, BORDER)),
     )
-    library_nav = ft.TextButton(
-        "Library", icon=ft.Icons.LIBRARY_MUSIC_ROUNDED, on_click=lambda e: switch_view("library"),
-    )
-    settings_nav = ft.TextButton(
-        "Settings", icon=ft.Icons.SETTINGS_OUTLINED, on_click=open_settings,
-    )
-    search_action_button = ft.Button(
-        content=ft.Row([search_progress, ft.Icon(ft.Icons.SEARCH_ROUNDED, size=17), ft.Text("Search")], spacing=7),
-        on_click=start_search,
-        style=ft.ButtonStyle(bgcolor=ACCENT, color=BG, padding=ft.Padding.symmetric(horizontal=14, vertical=11), shape=ft.RoundedRectangleBorder(radius=10)),
+    search_action_button = ft.IconButton(
+        icon=ft.Icons.ARROW_FORWARD_ROUNDED, icon_color=BG, bgcolor=ACCENT,
+        icon_size=17, width=30, height=30, tooltip="Search YouTube", on_click=start_search,
     )
     search_bar = ft.Container(
-        content=ft.Row([search_input, search_action_button], spacing=8),
-        expand=True,
+        content=ft.Row([search_input, search_progress, search_action_button], spacing=6),
+        width=430, padding=ft.Padding.only(left=8, right=4), bgcolor=PANEL_SOFT,
+        border=ft.Border.all(1, BORDER), border_radius=8,
     )
-    top_bar = ft.Row(
-        [
-            ft.Row([
-                ft.Container(width=10, height=10, border_radius=50, bgcolor=ACCENT),
-                ft.Text("AUDIO FLUX", size=12, weight=ft.FontWeight.W_700, color="#F4F6FA"),
-            ], spacing=10),
+    top_bar = ft.Container(
+        content=ft.Row([
+            ft.IconButton(icon=ft.Icons.ARROW_BACK_ROUNDED, icon_color=MUTED, icon_size=17,
+                          tooltip="Back to Home", on_click=lambda e: switch_view("home")),
             search_bar,
-            ft.Row([
-                home_nav,
-                library_nav,
-                settings_nav,
-            ], spacing=4),
-        ],
-        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        spacing=18,
+            ft.Container(expand=True),
+            ft.IconButton(icon=ft.Icons.NOTIFICATIONS_NONE_ROUNDED, icon_color=MUTED,
+                          tooltip="Notifications", on_click=lambda e: set_status("You're all caught up")),
+            ft.Container(content=ft.Text("A", size=11, weight=ft.FontWeight.W_700, color=TEXT),
+                         width=28, height=28, border_radius=14, bgcolor="#343832",
+                         alignment=ft.Alignment.CENTER),
+        ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        height=58, padding=ft.Padding.symmetric(horizontal=18),
+        border=ft.Border.only(bottom=ft.BorderSide(1, BORDER)),
     )
 
     player_card = ft.Container(
         content=ft.Column([
-            ft.Row([cover, ft.Column([status, track_title, artist], spacing=10, expand=True), ft.IconButton(icon=ft.Icons.CLOSE_FULLSCREEN_ROUNDED, icon_color=MUTED, tooltip="Collapse player", on_click=toggle_expanded_player)], spacing=24, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([
+                cover, ft.Column([status, track_title, artist], spacing=10, expand=True),
+                lyrics_button,
+                ft.IconButton(icon=ft.Icons.QUEUE_MUSIC_ROUNDED, icon_color=MUTED, tooltip="Open queue", on_click=open_queue),
+                ft.IconButton(icon=ft.Icons.CLOSE_FULLSCREEN_ROUNDED, icon_color=MUTED, tooltip="Collapse player", on_click=toggle_expanded_player),
+            ], spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Column([ft.Row([elapsed, total], alignment=ft.MainAxisAlignment.SPACE_BETWEEN), seek_slider_container], spacing=0),
             ft.Row([
                 shuffle_button,
@@ -1303,99 +1559,80 @@ def main(page: ft.Page):
         visible=False, expand=True, padding=24, bgcolor=PANEL, border_radius=22, border=ft.Border.all(1, "#252B36"),
     )
 
+    compact_play_button.icon_size = 26
+    compact_play_button.width = 42
+    compact_play_button.height = 42
     compact_player = ft.Container(
-        visible=False,
+        visible=True,
         content=ft.Row([
             ft.Row([
                 compact_cover,
-                ft.Column([compact_title, compact_artist], spacing=3, width=125),
+                ft.Column([compact_title, compact_artist], spacing=2, expand=True),
                 compact_favorite_button,
-        ], spacing=8, width=230),
-            ft.Row([
-                ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS_ROUNDED, icon_color=MUTED, tooltip="Previous track", on_click=previous_track),
-                compact_play_button,
-                ft.IconButton(icon=ft.Icons.SKIP_NEXT_ROUNDED, icon_color=MUTED, tooltip="Next track", on_click=next_track),
-            ], spacing=2),
-            ft.Container(content=compact_seek_slider, expand=True, padding=ft.Padding.symmetric(horizontal=8)),
-            ft.Row([
-                volume_mute_button,
-                ft.Container(content=volume_slider, width=90),
-                ft.IconButton(icon=ft.Icons.QUEUE_MUSIC_ROUNDED, icon_color=MUTED, tooltip="Open queue", on_click=open_queue),
-                lyrics_button,
-                ft.IconButton(icon=ft.Icons.OPEN_IN_FULL_ROUNDED, icon_color=MUTED, tooltip="Expand player", on_click=toggle_expanded_player),
-        ], spacing=1),
-        ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        padding=ft.Padding.symmetric(horizontal=14, vertical=9), bgcolor=PANEL,
-        border=ft.Border.only(top=ft.BorderSide(1, "#303744")),
-    )
-
-    waveform_bars = []
-    for index, height in enumerate([28, 46, 36, 58, 42, 64, 48, 32, 54, 38, 24]):
-        waveform_bars.append(ft.Container(
-            width=9, height=height, border_radius=8,
-            bgcolor=ACCENT if index in (3, 5, 8) else "#526B50",
-            animate=ft.Animation(420, "easeInOut"),
-        ))
-    waveform = ft.Row(
-        waveform_bars,
-        spacing=7, alignment=ft.MainAxisAlignment.CENTER,
-        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-    )
-
-    def dismiss_hero(e=None):
-        nonlocal hero_dismissed
-        hero_dismissed = True
-        landing_panel.visible = False
-        page.update()
-
-    async def animate_waveform():
-        while landing_panel.visible:
-            for bar in waveform_bars:
-                bar.height = random.randint(14, 66)
-            page.update()
-            await asyncio.sleep(0.52)
-
-    landing_panel = ft.Container(
-        content=ft.Row([
+            ], spacing=10, width=250, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Column([
                 ft.Row([
-                    ft.Text("A LITTLE LESS ALGORITHM. A LOT MORE YOU.", size=10, color=ACCENT, weight=ft.FontWeight.W_700, expand=True),
-                    ft.IconButton(icon=ft.Icons.CLOSE_ROUNDED, icon_color="#AAB2B9", icon_size=17, tooltip="Dismiss banner", on_click=dismiss_hero),
-                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Text("Your next favorite\nis one search away.", size=31, height=82, color="#F4F6FA", weight=ft.FontWeight.W_700),
-                ft.Text("Find the songs you love, then stream or save\nthem straight from your library.", size=13, color="#AAB2B9", height=42),
+                    compact_shuffle_button,
+                    ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS_ROUNDED, icon_color=MUTED, tooltip="Previous track", on_click=previous_track),
+                    compact_play_button,
+                    ft.IconButton(icon=ft.Icons.SKIP_NEXT_ROUNDED, icon_color=MUTED, tooltip="Next track", on_click=next_track),
+                    compact_repeat_button,
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=2),
                 ft.Row([
-                    ft.Icon(ft.Icons.SEARCH_ROUNDED, size=15, color=ACCENT),
-                    ft.Text("SEARCH", size=9, color="#E5EADF", weight=ft.FontWeight.W_700),
-                    ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, size=15, color=ACCENT),
-                    ft.Text("STREAM", size=9, color="#E5EADF", weight=ft.FontWeight.W_700),
-                    ft.Icon(ft.Icons.DOWNLOAD_OUTLINED, size=14, color=ACCENT),
-                    ft.Text("SAVE", size=9, color="#E5EADF", weight=ft.FontWeight.W_700),
-                ], spacing=7),
-            ], spacing=14, expand=True),
-            ft.Container(
-                content=ft.Column([
-                    ft.Container(
-                        content=ft.Icon(ft.Icons.HEADPHONES_ROUNDED, size=48, color="#E7F1D8"),
-                        width=90, height=90, border_radius=45, bgcolor="#29372D",
-                        alignment=ft.Alignment.CENTER,
-                        border=ft.Border.all(1, "#526B50"),
-                    ),
-                    waveform,
-                    ft.Text("TUNE IN TO YOUR TASTE", size=9, color="#AAB2B9", weight=ft.FontWeight.W_700),
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, alignment=ft.MainAxisAlignment.CENTER, spacing=9),
-                width=210, height=190, bgcolor="#121A18", border_radius=18,
-                alignment=ft.Alignment.CENTER,
-            ),
-        ], spacing=28, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        padding=28, border_radius=22,
-        gradient=ft.LinearGradient(
-            begin=ft.Alignment.TOP_LEFT,
-            end=ft.Alignment.BOTTOM_RIGHT,
-            colors=["#26352D", "#19221F", "#151A20"],
-        ),
-        border=ft.Border.all(1, "#35443A"),
-        visible=not hero_dismissed,
+                    compact_elapsed,
+                    ft.Container(content=compact_seek_slider, expand=True),
+                    compact_total,
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ], expand=True, spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([
+                lyrics_button,
+                ft.IconButton(icon=ft.Icons.QUEUE_MUSIC_ROUNDED, icon_color=MUTED, tooltip="Open queue", on_click=open_queue),
+                volume_mute_button,
+                ft.Container(content=volume_slider, width=96),
+                ft.IconButton(icon=ft.Icons.OPEN_IN_FULL_ROUNDED, icon_color=MUTED, tooltip="Expand player", on_click=toggle_expanded_player),
+            ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=ft.Padding.symmetric(horizontal=16, vertical=8), bgcolor="#121513",
+        border=ft.Border.only(top=ft.BorderSide(1, BORDER)),
+        height=82,
+    )
+
+    def search_mood(query):
+        search_input.value = query
+        start_search()
+
+    mood_options = [
+        ("Slow mornings", "Soft picks to ease into the day", "acoustic chill songs", ft.Icons.WB_SUNNY_OUTLINED, "#26372E"),
+        ("Soul after hours", "Warm voices, timeless songs", "soul classics", ft.Icons.NIGHTLIGHT_ROUNDED, "#292D3C"),
+        ("In your feelings", "A little space for the lyrics", "emotional indie songs", ft.Icons.FAVORITE_ROUNDED, "#3A2930"),
+    ]
+    mood_tiles = []
+    mood_artwork_controls = []
+    for mood_title, mood_caption, mood_query, mood_icon, mood_color in mood_options:
+        mood_art = ft.Container(content=ft.Icon(mood_icon, size=17, color=ACCENT), width=36, height=36,
+                                border_radius=7, bgcolor=mood_color, alignment=ft.Alignment.CENTER)
+        mood_artwork_controls.append(mood_art)
+        mood_tiles.append(ft.Container(
+            content=ft.Row([
+                mood_art,
+                ft.Column([
+                    ft.Text(mood_title, size=10, color=TEXT, weight=ft.FontWeight.W_600, max_lines=1),
+                    ft.Text(mood_caption, size=8, color=MUTED, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ], spacing=2, expand=True),
+            ], spacing=8),
+            padding=8, bgcolor=PANEL_SOFT, border_radius=7, expand=True,
+            on_click=lambda e, query=mood_query: search_mood(query),
+            ink=True, tooltip=f"Search {mood_query}",
+        ))
+    landing_panel = ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Text("Find your next mood", size=14, color=TEXT, weight=ft.FontWeight.W_600, expand=True),
+                ft.TextButton("Explore more", style=ft.ButtonStyle(color=MUTED), on_click=lambda e: search_input.focus()),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            ft.Row(mood_tiles, spacing=8),
+        ], spacing=8),
+        padding=12, bgcolor=BG, border_radius=8, visible=True,
     )
     quick_pick_searches = [
         "official music videos",
@@ -1410,7 +1647,7 @@ def main(page: ft.Page):
     quick_pick_list = ft.Container()
     quick_view_toggle = ft.SegmentedButton(
         segments=[ft.Segment(value="list", icon=ft.Icons.VIEW_LIST_ROUNDED), ft.Segment(value="grid", icon=ft.Icons.GRID_VIEW_ROUNDED)],
-        selected=["list"], allow_empty_selection=False, show_selected_icon=False,
+        selected=["grid"], allow_empty_selection=False, show_selected_icon=False,
         on_change=lambda e: set_quick_view(e.control.selected[0]),
         tooltip="Change Quick Picks layout",
     )
@@ -1427,8 +1664,12 @@ def main(page: ft.Page):
                 and (track.get("duration") is None or 60 <= track["duration"] <= 900)
             ]
             if candidates:
-                quick_pick_tracks = random.sample(candidates, min(6, len(candidates)))
+                quick_pick_tracks = random.sample(candidates, min(4, len(candidates)))
                 quick_pick_list.content = render_track_collection(quick_pick_tracks, quick_view_mode)
+                for index, artwork in enumerate(mood_artwork_controls):
+                    track = quick_pick_tracks[index] if index < len(quick_pick_tracks) else None
+                    if track and track.get("thumbnail"):
+                        artwork.content = ft.Image(src=track["thumbnail"], width=36, height=36, fit=ft.BoxFit.COVER, border_radius=7)
                 quick_pick_status.value = f"Fresh tracks from YouTube · {query}"
             else:
                 quick_pick_tracks = []
@@ -1455,18 +1696,18 @@ def main(page: ft.Page):
         content=ft.Column([
             ft.Row([
                 ft.Column([
-                    ft.Text("Quick Picks", size=17, color="#F4F6FA", weight=ft.FontWeight.W_600),
+                    ft.Text("Quick picks", size=16, color=TEXT, weight=ft.FontWeight.W_600),
                     quick_pick_status,
-                ], spacing=3),
+                ], spacing=3, expand=True),
                 ft.Row([
                     quick_pick_progress,
                     quick_view_toggle,
-                    ft.TextButton("Shuffle", icon=ft.Icons.SHUFFLE_ROUNDED, on_click=shuffle_quick_picks),
+                    ft.TextButton("Refresh picks", icon=ft.Icons.REFRESH_ROUNDED, style=ft.ButtonStyle(color=MUTED), on_click=shuffle_quick_picks),
                 ], spacing=8),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             quick_pick_list,
-        ], spacing=14),
-        padding=18, bgcolor=PANEL, border_radius=18, border=ft.Border.all(1, "#252B36"),
+        ], spacing=12),
+        padding=ft.Padding.only(top=4, bottom=8),
     )
 
     continue_list = ft.Container()
@@ -1511,28 +1752,86 @@ def main(page: ft.Page):
         ))
         return forgotten[:5]
 
-    def home_music_section(title, description, icon, content):
+    def home_music_section(title, description, icon, content, action=None):
+        header = ft.Row([
+            ft.Text(title, size=16, color=TEXT, weight=ft.FontWeight.W_600, expand=True),
+            action or ft.Container(),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
         return ft.Container(
             content=ft.Column([
-                ft.Row([ft.Icon(icon, size=18, color=ACCENT), ft.Text(title, size=16, color="#F4F6FA", weight=ft.FontWeight.W_600, expand=True)], spacing=9),
+                header,
                 ft.Text(description, size=11, color=MUTED),
                 content,
-            ], spacing=10),
-            padding=18, bgcolor=PANEL, border_radius=17,
-            border=ft.Border.all(1, "#252B36"),
+            ], spacing=8),
+            padding=ft.Padding.only(top=4, bottom=8),
         )
 
-    continue_panel = home_music_section("Continue Listening", "Resume a recent track from where you left off.", ft.Icons.QUEUE_MUSIC_ROUNDED, continue_list)
-    forgotten_panel = home_music_section("Forgotten Favorites", "Your saved tracks that have been waiting for a replay.", ft.Icons.HISTORY_ROUNDED, forgotten_list)
+    continue_panel = home_music_section(
+        "Continue listening",
+        "Resume a recent track from where you left off.",
+        ft.Icons.QUEUE_MUSIC_ROUNDED,
+        continue_list,
+        ft.TextButton("Recently played", style=ft.ButtonStyle(color=MUTED), on_click=lambda e: switch_view("library", "top50")),
+    )
+    forgotten_panel = home_music_section(
+        "Forgotten favorites",
+        "Your saved tracks that have been waiting for a replay.",
+        ft.Icons.HISTORY_ROUNDED,
+        forgotten_list,
+    )
+
+    def set_home_feed(mode):
+        nonlocal home_feed_mode
+        home_feed_mode = mode
+        for_you_chip.bgcolor = "#F3F6F0" if mode == "for_you" else ft.Colors.TRANSPARENT
+        for_you_label.color = BG if mode == "for_you" else MUTED
+        new_finds_chip.bgcolor = "#F3F6F0" if mode == "new_finds" else ft.Colors.TRANSPARENT
+        new_finds_label.color = BG if mode == "new_finds" else MUTED
+        if mode == "new_finds":
+            shuffle_quick_picks()
+        refresh_home_sections()
+        page.update()
+
+    for_you_label = ft.Text("For you", size=11, weight=ft.FontWeight.W_600, color=BG)
+    new_finds_label = ft.Text("New finds", size=11, weight=ft.FontWeight.W_600, color=MUTED)
+    for_you_chip = ft.Container(
+        content=for_you_label, padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+        bgcolor="#F3F6F0", border_radius=16, on_click=lambda e: set_home_feed("for_you"),
+    )
+    new_finds_chip = ft.Container(
+        content=new_finds_label, padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+        bgcolor=ft.Colors.TRANSPARENT, border_radius=16, on_click=lambda e: set_home_feed("new_finds"),
+    )
+    home_feed_toggle = ft.Container(
+        content=ft.Row([for_you_chip, new_finds_chip], spacing=4),
+        padding=4, bgcolor=PANEL_SOFT, border_radius=20,
+    )
+
+    def refresh_nav_counts():
+        library_nav_count.value = str(len(all_library_tracks()))
+        favorites_nav_count.value = str(len(favorites))
+        downloads_nav_count.value = str(len(downloaded_tracks) or len(scan_download_folder(download_directory or os.getcwd())))
+
     def refresh_home_sections():
         recent = continue_tracks()
         forgotten = forgotten_favorites()
-        continue_list.content = render_track_collection(recent, "list") if recent else ft.Text("Your recent listening will appear here.", size=12, color=MUTED)
+        continue_list.content = ft.Row(
+            [continue_card(track) for track in recent[:2]],
+            spacing=10,
+        ) if recent else ft.Text("Your recent listening will appear here.", size=12, color=MUTED)
         forgotten_list.content = render_track_collection(forgotten, "list") if forgotten else ft.Text("No forgotten favorites yet. Songs you haven't played in a while will show up here.", size=12, color=MUTED)
-        continue_panel.visible = bool(recent)
-        forgotten_panel.visible = bool(forgotten)
+        on_home = current_view == "home"
+        continue_panel.visible = on_home and home_feed_mode == "for_you" and bool(recent)
+        forgotten_panel.visible = on_home and home_feed_mode == "for_you" and bool(forgotten)
+        quick_picks_panel.visible = on_home
+        landing_panel.visible = on_home
+        refresh_nav_counts()
+        refresh_queue()
 
-    home_heading = ft.Column([heading, subtitle], spacing=4)
+    home_heading = ft.Row([
+        ft.Column([heading, subtitle], spacing=4, expand=True),
+        home_feed_toggle,
+    ], vertical_alignment=ft.CrossAxisAlignment.START)
     home_info = ft.Row([ft.Icon(ft.Icons.INFO_OUTLINE, size=14, color="#737B89"), ft.Text("Tracks are searched and streamed from YouTube using yt-dlp.", size=11, color="#737B89")], spacing=7)
     home_view = ft.Column([
         home_heading,
@@ -1658,9 +1957,12 @@ def main(page: ft.Page):
     def all_library_tracks():
         merged = []
         seen = set()
-        sources = [downloaded_tracks, favorites, *[
-            [track for track in listening_history.values() if track.get("url")]
-        ]]
+        sources = [
+            downloaded_tracks,
+            favorites,
+            [track for track in listening_history.values() if track.get("url")],
+            *[playlist.get("tracks", []) for playlist in playlists],
+        ]
         for collection in sources:
             for track in collection:
                 identity = str(track.get("url") or track.get("id") or "")
@@ -1691,8 +1993,11 @@ def main(page: ft.Page):
                 ], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
                 padding=38, bgcolor=PANEL, border_radius=18, alignment=ft.Alignment.CENTER,
             )
+        visible = [item for item in playlists if item.get("id") == opened_playlist_id] if opened_playlist_id else playlists
+        if opened_playlist_id and not visible:
+            visible = playlists
         cards = []
-        for playlist in playlists:
+        for playlist in visible:
             tracks = playlist.get("tracks", [])
             cards.append(ft.Container(
                 content=ft.Column([
@@ -1708,11 +2013,18 @@ def main(page: ft.Page):
                 ], spacing=10),
                 padding=15, bgcolor=PANEL, border_radius=16, border=ft.Border.all(1, "#252B36"),
             ))
+        if opened_playlist_id:
+            return ft.Column([
+                ft.TextButton("All playlists", icon=ft.Icons.ARROW_BACK_ROUNDED, on_click=lambda e: switch_view("library", "playlists")),
+                *cards,
+            ], spacing=12)
         return ft.Column(cards, spacing=12)
 
     def refresh_library():
         refresh_downloads()
         refresh_favorites()
+        refresh_sidebar_playlists()
+        refresh_nav_counts()
         clear_history_button.visible = library_section == "all"
         for button, key in zip(library_tabs.controls, ("all", "downloads", "favorites", "top50", "playlists")):
             button.style = ft.ButtonStyle(color=ACCENT if library_section == key else MUTED)
@@ -1770,49 +2082,69 @@ def main(page: ft.Page):
         library_content,
     ], spacing=16, expand=True, scroll=ft.ScrollMode.AUTO, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
-    main_content = ft.Container(content=home_view, expand=True)
+    main_content = ft.Container(
+        content=home_view, expand=True,
+        padding=ft.Padding.only(left=24, right=18, top=16, bottom=8),
+    )
     content_region = ft.Row(
-        [main_content, lyrics_panel], expand=True, spacing=16,
-        vertical_alignment=ft.CrossAxisAlignment.START,
+        [main_content, lyrics_panel], expand=True, spacing=0,
+        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
-    def switch_view(view_name, section=None):
-        nonlocal current_view, library_section, current_search_query, search_generation, loaded_search_tracks, search_fetch_limit, player_expanded
-        current_view = view_name
+    def update_navigation():
+        style_nav_item("home", current_view == "home")
+        style_nav_item("search", current_view == "search")
+        style_nav_item("library", current_view == "library" and library_section == "all")
+        style_nav_item("favorites", current_view == "library" and library_section == "favorites")
+        style_nav_item("downloads", current_view == "library" and library_section == "downloads")
+        style_nav_item("playlists", current_view == "library" and library_section == "playlists")
+        style_nav_item("settings", False)
+        refresh_nav_counts()
+
+    def switch_view(view_name, section=None, playlist_id=None):
+        nonlocal current_view, library_section, current_search_query, search_generation, loaded_search_tracks, search_fetch_limit, player_expanded, opened_playlist_id
         player_expanded = False
         player_card.visible = False
         content_region.visible = True
-        compact_player.visible = current_source is not None
+        compact_player.visible = True
         if view_name == "library":
+            current_view = "library"
             if section:
                 library_section = section
+            opened_playlist_id = playlist_id if section == "playlists" else None
             main_content.content = library_view
-            library_nav.style = ft.ButtonStyle(color=ACCENT)
-            home_nav.style = ft.ButtonStyle(color=MUTED)
             refresh_library()
+        elif view_name == "search":
+            current_view = "search"
+            main_content.content = home_view
+            continue_panel.visible = False
+            forgotten_panel.visible = False
+            quick_picks_panel.visible = not bool(current_search_query)
+            landing_panel.visible = not bool(current_search_query)
+            if current_search_query and loaded_search_tracks:
+                results_panel.visible = True
+            else:
+                results_panel.visible = True
+                if not current_search_query:
+                    results_summary.value = "Search songs, artists, or paste a YouTube link"
+                    results_list.content = ft.Text("Type a query above, or pick a mood to start exploring.", size=12, color=MUTED)
         else:
-            search_generation += 1
-            current_search_query = ""
-            loaded_search_tracks = []
-            search_fetch_limit = 24
-            search_input.value = ""
-            search_progress.visible = False
-            results_summary.value = "Search to see matching tracks"
-            results_list.content = None
-            load_more_button.visible = False
-            load_more_button.disabled = False
+            current_view = "home"
             results_panel.visible = False
-            landing_panel.visible = not hero_dismissed
+            landing_panel.visible = True
             quick_picks_panel.visible = True
             refresh_home_sections()
             main_content.content = home_view
-            home_nav.style = ft.ButtonStyle(color=ACCENT)
-            library_nav.style = ft.ButtonStyle(color=MUTED)
+        update_navigation()
         page.update()
 
-    home_nav.style = ft.ButtonStyle(color=ACCENT)
-    library_nav.style = ft.ButtonStyle(color=MUTED)
-    page.add(ft.Column([top_bar, content_region, player_card, compact_player], spacing=12, expand=True))
+    update_navigation()
+    workspace = ft.Column([top_bar, content_region, player_card], spacing=0, expand=True)
+    app_layout = ft.Column([
+        ft.Row([sidebar, workspace], spacing=0, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH),
+        compact_player,
+    ], spacing=0, expand=True)
+    page.add(app_layout)
 
     def handle_keyboard_shortcut(event):
         if (event.ctrl or event.meta) and (event.key or "").lower() == "k":
@@ -1838,4 +2170,3 @@ def main(page: ft.Page):
     refresh_home_sections()
     page.update()
     shuffle_quick_picks()
-    page.run_task(animate_waveform)
